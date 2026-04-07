@@ -300,6 +300,11 @@ def extract_top_n(user_query, default=5):
     match = re.search(r"top\s+(\d+)", user_query.lower())
     if match:
         return int(match.group(1))
+
+    match = re.search(r"show\s+the\s+(\d+)", user_query.lower())
+    if match:
+        return int(match.group(1))
+
     return default
 
 
@@ -459,6 +464,53 @@ def render_paginated_dataframe(df, key_prefix="data_viewer", title="Data Explore
         use_container_width=True,
         height=500
     )
+
+# ---------------------------
+# Follow-up bridge memory helpers
+# ---------------------------
+def is_multi_bridge_followup(text: str):
+    q = text.lower().strip()
+    trigger_phrases = [
+        "these bridges",
+        "those bridges",
+        "these 5 bridges",
+        "those 5 bridges",
+        "these five bridges",
+        "trend for these",
+        "trend for those",
+        "plot the trend for these",
+        "plot trend for these",
+        "show me the trend for these",
+        "show trend for these",
+        "show their trend",
+        "plot their trend",
+        "trend for them",
+        "plot them",
+        "show me the trend for them",
+        "plot the trend for those bridges"
+    ]
+    return any(p in q for p in trigger_phrases)
+
+
+def initialize_session_state():
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {
+                "role": "assistant",
+                "content": "Ask me about bridge deterioration trends, bridge profiles, clusters, Bridge Health Index patterns, or inspect and browse the dataset."
+            }
+        ]
+
+    if "pending_compare_cluster" not in st.session_state:
+        st.session_state.pending_compare_cluster = None
+
+    if "last_bridge_result_ids" not in st.session_state:
+        st.session_state.last_bridge_result_ids = None
+
+    if "last_bridge_result_label" not in st.session_state:
+        st.session_state.last_bridge_result_label = None
+
+initialize_session_state()
 
 # ---------------------------
 # Dataset inspection functions
@@ -1131,16 +1183,14 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
 
     if df_filtered_2.shape[1] < 2:
         return {
-            "text": f"I found partial information, but not enough to answer fully. "
-                    f"Too few PCA variables remained for cluster {cluster_id}."
+            "text": f"I found partial information, but not enough to answer fully. Too few PCA variables remained for cluster {cluster_id}."
         }
 
     df_filtered_2 = df_filtered_2.dropna()
 
     if df_filtered_2.shape[0] < 2:
         return {
-            "text": f"I found partial information, but not enough to answer fully. "
-                    f"Too few rows remained after cleaning for cluster {cluster_id}."
+            "text": f"I found partial information, but not enough to answer fully. Too few rows remained after cleaning for cluster {cluster_id}."
         }
 
     scaler = StandardScaler()
@@ -1185,44 +1235,87 @@ def get_top_deteriorating_bridges(top_n=5):
     subset = subset.sort_values("deterioration_slope_per_year", ascending=True).head(top_n)
 
     lines = [f"Top {top_n} fastest deteriorating bridges based on slope:"]
+    bridge_id_list = []
+
     for _, row in subset.iterrows():
+        bid = str(row["STRUCTURE_NUMBER_008"])
+        bridge_id_list.append(bid)
         lines.append(
-            f"- Bridge {row['STRUCTURE_NUMBER_008']}: slope {row['deterioration_slope_per_year']:.3f}, "
+            f"- Bridge {bid}: slope {row['deterioration_slope_per_year']:.3f}, "
             f"latest overall BHI {row['Bridge Health Index (Overall)']:.2f}, cluster {int(row['Cluster'])}"
         )
-    return "\n".join(lines)
+
+    return {
+        "text": "\n".join(lines),
+        "bridge_ids": bridge_id_list,
+        "analysis_df": subset[[
+            "STRUCTURE_NUMBER_008",
+            "deterioration_slope_per_year",
+            "Bridge Health Index (Overall)",
+            "Cluster"
+        ]].copy(),
+        "label": f"top_{top_n}_deteriorating_bridges"
+    }
 
 
 def get_top_best_bridges(year, top_n=5):
     year = int(year)
     subset = ts_df[ts_df["Year of Data"] == year].copy()
     if subset.empty:
-        return f"No data found for year {year}."
+        return {"text": f"No data found for year {year}."}
 
     subset = subset.sort_values("Bridge Health Index (Overall)", ascending=False).head(top_n)
 
     lines = [f"Top {top_n} bridges by overall BHI in {year}:"]
+    bridge_id_list = []
+
     for _, row in subset.iterrows():
+        bid = str(row["STRUCTURE_NUMBER_008"])
+        bridge_id_list.append(bid)
         lines.append(
-            f"- Bridge {row['STRUCTURE_NUMBER_008']}: {row['Bridge Health Index (Overall)']:.2f}"
+            f"- Bridge {bid}: {row['Bridge Health Index (Overall)']:.2f}"
         )
-    return "\n".join(lines)
+
+    return {
+        "text": "\n".join(lines),
+        "bridge_ids": bridge_id_list,
+        "analysis_df": subset[[
+            "STRUCTURE_NUMBER_008",
+            "Year of Data",
+            "Bridge Health Index (Overall)"
+        ]].copy(),
+        "label": f"top_{top_n}_best_bridges_{year}"
+    }
 
 
 def get_top_worst_bridges(year, top_n=5):
     year = int(year)
     subset = ts_df[ts_df["Year of Data"] == year].copy()
     if subset.empty:
-        return f"No data found for year {year}."
+        return {"text": f"No data found for year {year}."}
 
     subset = subset.sort_values("Bridge Health Index (Overall)", ascending=True).head(top_n)
 
     lines = [f"Top {top_n} worst bridges by overall BHI in {year}:"]
+    bridge_id_list = []
+
     for _, row in subset.iterrows():
+        bid = str(row["STRUCTURE_NUMBER_008"])
+        bridge_id_list.append(bid)
         lines.append(
-            f"- Bridge {row['STRUCTURE_NUMBER_008']}: {row['Bridge Health Index (Overall)']:.2f}"
+            f"- Bridge {bid}: {row['Bridge Health Index (Overall)']:.2f}"
         )
-    return "\n".join(lines)
+
+    return {
+        "text": "\n".join(lines),
+        "bridge_ids": bridge_id_list,
+        "analysis_df": subset[[
+            "STRUCTURE_NUMBER_008",
+            "Year of Data",
+            "Bridge Health Index (Overall)"
+        ]].copy(),
+        "label": f"top_{top_n}_worst_bridges_{year}"
+    }
 
 # ---------------------------
 # Plotting
@@ -1241,6 +1334,33 @@ def make_bridge_trend_figure(bridge_id):
     ax.set_title(f"Bridge Trend: {matched}", fontsize=12, pad=10)
     ax.set_xlabel("Year")
     ax.set_ylabel("Bridge Health Index (Overall)")
+    ax.grid(True, alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def make_multi_bridge_trend_figure(bridge_id_list):
+    if not bridge_id_list:
+        return None
+
+    valid_ids = [find_best_bridge_match(b) for b in bridge_id_list]
+    valid_ids = [b for b in valid_ids if b is not None and b in pivot_df.index]
+
+    if not valid_ids:
+        return None
+
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+
+    for bid in valid_ids:
+        row = pivot_df.loc[bid]
+        ax.plot(row.index, row.values, marker="o", linewidth=2, label=bid)
+
+    ax.set_title("Trend for Selected Bridges", fontsize=12, pad=10)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Bridge Health Index (Overall)")
+    ax.legend(fontsize=8, loc="best")
     ax.grid(True, alpha=0.3)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -1388,6 +1508,12 @@ Python analysis rule:
 - The final answer must come only from executed Python results.
 - Do not guess.
 - Return a traceable summary of the analysis steps.
+
+Follow-up reference rule:
+- If the user says "these bridges", "those bridges", "these 5 bridges", "those 5", or "their trend",
+  first check whether a previous tool result returned bridge_ids.
+- If bridge_ids are available, use those IDs rather than asking for clarification.
+- Never replace such follow-up requests with the full dataset.
 """
 
 def extract_text_from_content_blocks(content_blocks):
@@ -1770,17 +1896,17 @@ def execute_tool(tool_name, tool_input):
 
     if tool_name == "top_deteriorating_bridges":
         top_n = int(tool_input.get("top_n", 5))
-        return {"text": get_top_deteriorating_bridges(top_n=top_n)}
+        return get_top_deteriorating_bridges(top_n=top_n)
 
     if tool_name == "top_best_bridges_year":
         year = int(tool_input["year"])
         top_n = int(tool_input.get("top_n", 5))
-        return {"text": get_top_best_bridges(year, top_n=top_n)}
+        return get_top_best_bridges(year, top_n=top_n)
 
     if tool_name == "top_worst_bridges_year":
         year = int(tool_input["year"])
         top_n = int(tool_input.get("top_n", 5))
-        return {"text": get_top_worst_bridges(year, top_n=top_n)}
+        return get_top_worst_bridges(year, top_n=top_n)
 
     if tool_name == "dataset_schema":
         max_sample_values = int(tool_input.get("max_sample_values", 5))
@@ -1831,6 +1957,8 @@ def ask_bedrock_with_tools(user_prompt):
     pending_generated_code = None
     pending_execution_steps = None
     pending_stdout = None
+    pending_bridge_ids = None
+    pending_label = None
     loops = 0
     max_loops = 6
 
@@ -1856,7 +1984,9 @@ def ask_bedrock_with_tools(user_prompt):
             "analysis_df": None,
             "generated_code": None,
             "execution_steps": None,
-            "stdout": None
+            "stdout": None,
+            "bridge_ids": None,
+            "label": None
         }
     except Exception as e:
         return {
@@ -1873,7 +2003,9 @@ def ask_bedrock_with_tools(user_prompt):
             "analysis_df": None,
             "generated_code": None,
             "execution_steps": None,
-            "stdout": None
+            "stdout": None,
+            "bridge_ids": None,
+            "label": None
         }
 
     while loops < max_loops:
@@ -1916,7 +2048,9 @@ def ask_bedrock_with_tools(user_prompt):
                 "analysis_df": pending_analysis_df,
                 "generated_code": pending_generated_code,
                 "execution_steps": pending_execution_steps,
-                "stdout": pending_stdout
+                "stdout": pending_stdout,
+                "bridge_ids": pending_bridge_ids,
+                "label": pending_label
             }
 
         if stop_reason == "tool_use":
@@ -1969,6 +2103,12 @@ def ask_bedrock_with_tools(user_prompt):
                 if "stdout" in result:
                     pending_stdout = result["stdout"]
 
+                if "bridge_ids" in result:
+                    pending_bridge_ids = result["bridge_ids"]
+
+                if "label" in result:
+                    pending_label = result["label"]
+
                 if result.get("show_trend_chart"):
                     pending_chart = {
                         "type": "trend",
@@ -2019,7 +2159,9 @@ def ask_bedrock_with_tools(user_prompt):
                     "analysis_df": None,
                     "generated_code": None,
                     "execution_steps": None,
-                    "stdout": None
+                    "stdout": None,
+                    "bridge_ids": None,
+                    "label": None
                 }
 
             messages.append({
@@ -2049,7 +2191,9 @@ def ask_bedrock_with_tools(user_prompt):
                     "analysis_df": pending_analysis_df,
                     "generated_code": pending_generated_code,
                     "execution_steps": pending_execution_steps,
-                    "stdout": pending_stdout
+                    "stdout": pending_stdout,
+                    "bridge_ids": pending_bridge_ids,
+                    "label": pending_label
                 }
             except Exception as e:
                 return {
@@ -2066,7 +2210,9 @@ def ask_bedrock_with_tools(user_prompt):
                     "analysis_df": pending_analysis_df,
                     "generated_code": pending_generated_code,
                     "execution_steps": pending_execution_steps,
-                    "stdout": pending_stdout
+                    "stdout": pending_stdout,
+                    "bridge_ids": pending_bridge_ids,
+                    "label": pending_label
                 }
 
             continue
@@ -2085,7 +2231,9 @@ def ask_bedrock_with_tools(user_prompt):
             "analysis_df": pending_analysis_df,
             "generated_code": pending_generated_code,
             "execution_steps": pending_execution_steps,
-            "stdout": pending_stdout
+            "stdout": pending_stdout,
+            "bridge_ids": pending_bridge_ids,
+            "label": pending_label
         }
 
     return {
@@ -2102,17 +2250,54 @@ def ask_bedrock_with_tools(user_prompt):
         "analysis_df": pending_analysis_df,
         "generated_code": pending_generated_code,
         "execution_steps": pending_execution_steps,
-        "stdout": pending_stdout
+        "stdout": pending_stdout,
+        "bridge_ids": pending_bridge_ids,
+        "label": pending_label
     }
 
 
 def answer_question(question):
-    if "pending_compare_cluster" not in st.session_state:
-        st.session_state.pending_compare_cluster = None
-
     pending_base = st.session_state.pending_compare_cluster
     followup_target = extract_compare_target(question)
 
+    # ---------------------------
+    # Handle bridge list follow-up
+    # ---------------------------
+    if is_multi_bridge_followup(question) and st.session_state.last_bridge_result_ids:
+        bridge_id_list = st.session_state.last_bridge_result_ids
+
+        lines = ["Showing the trend for these bridges:"]
+        for bid in bridge_id_list:
+            lines.append(f"- {bid}")
+
+        fig = make_multi_bridge_trend_figure(bridge_id_list)
+
+        return {
+            "text": "\n".join(lines),
+            "figure": fig,
+            "summary_df": None,
+            "cluster_df": None,
+            "pc1_table": None,
+            "schema_df": None,
+            "column_df": None,
+            "values_df": None,
+            "preview_df": None,
+            "browse_df": None,
+            "analysis_df": pd.DataFrame({"STRUCTURE_NUMBER_008": bridge_id_list}),
+            "generated_code": None,
+            "execution_steps": [
+                "Detected a follow-up request referring to the most recent bridge list.",
+                "Loaded the previously returned bridge IDs from session state.",
+                "Plotted the BHI trend for those bridges from pivot_df."
+            ],
+            "stdout": None,
+            "bridge_ids": bridge_id_list,
+            "label": st.session_state.last_bridge_result_label
+        }
+
+    # ---------------------------
+    # Existing pending cluster compare follow-up
+    # ---------------------------
     if pending_base is not None and followup_target is not None:
         result = execute_tool(
             "compare_clusters",
@@ -2141,7 +2326,9 @@ def answer_question(question):
             "analysis_df": result.get("analysis_df"),
             "generated_code": result.get("generated_code"),
             "execution_steps": result.get("execution_steps"),
-            "stdout": result.get("stdout")
+            "stdout": result.get("stdout"),
+            "bridge_ids": result.get("bridge_ids"),
+            "label": result.get("label")
         }
 
     routed = route_question(question)
@@ -2162,7 +2349,9 @@ def answer_question(question):
             "analysis_df": None,
             "generated_code": None,
             "execution_steps": None,
-            "stdout": None
+            "stdout": None,
+            "bridge_ids": None,
+            "label": None
         }
 
     if routed["mode"] == "direct_tool":
@@ -2189,7 +2378,9 @@ def answer_question(question):
             "analysis_df": result.get("analysis_df"),
             "generated_code": result.get("generated_code"),
             "execution_steps": result.get("execution_steps"),
-            "stdout": result.get("stdout")
+            "stdout": result.get("stdout"),
+            "bridge_ids": result.get("bridge_ids"),
+            "label": result.get("label")
         }
 
     st.session_state.pending_compare_cluster = None
@@ -2209,6 +2400,8 @@ def answer_question(question):
     generated_code = result.get("generated_code")
     execution_steps = result.get("execution_steps")
     stdout = result.get("stdout")
+    bridge_id_list = result.get("bridge_ids")
+    label = result.get("label")
 
     if chart:
         if chart["type"] == "trend":
@@ -2234,7 +2427,9 @@ def answer_question(question):
         "analysis_df": analysis_df,
         "generated_code": generated_code,
         "execution_steps": execution_steps,
-        "stdout": stdout
+        "stdout": stdout,
+        "bridge_ids": bridge_id_list,
+        "label": label
     }
 
 # ---------------------------
@@ -2270,6 +2465,7 @@ with st.sidebar:
     - What values does SERVICE_ON_042A contain?
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
+    - Show me the trend for these 5 bridges
     - Show the 5 best bridges in 2020
     - Give me the profile for bridge {example_3}
     """)
@@ -2287,14 +2483,6 @@ if open_explorer:
 # ---------------------------
 # Chat history
 # ---------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "assistant",
-            "content": "Ask me about bridge deterioration trends, bridge profiles, clusters, Bridge Health Index patterns, or inspect and browse the dataset."
-        }
-    ]
-
 for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         if message.get("content"):
@@ -2335,7 +2523,6 @@ for idx, message in enumerate(st.session_state.messages):
                 title="Dataset Rows"
             )
 
-
         if "analysis_df" in message and message["analysis_df"] is not None:
             st.subheader("Analysis Results")
             st.dataframe(pd.DataFrame(message["analysis_df"]), use_container_width=True)
@@ -2368,6 +2555,12 @@ if user_prompt:
         st.write(user_prompt)
 
     result = answer_question(user_prompt)
+
+    # Save bridge-list memory for follow-up questions like:
+    # "show me the trend for these 5 bridges"
+    if result.get("bridge_ids") is not None:
+        st.session_state.last_bridge_result_ids = result["bridge_ids"]
+        st.session_state.last_bridge_result_label = result.get("label")
 
     assistant_message = {
         "role": "assistant",
@@ -2409,6 +2602,12 @@ if user_prompt:
 
     if result.get("stdout") is not None:
         assistant_message["stdout"] = result["stdout"]
+
+    if result.get("bridge_ids") is not None:
+        assistant_message["bridge_ids"] = result["bridge_ids"]
+
+    if result.get("label") is not None:
+        assistant_message["label"] = result["label"]
 
     with st.chat_message("assistant"):
         if result.get("text"):
