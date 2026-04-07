@@ -251,7 +251,7 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
     preprocessing_summary = {
         "raw_rows_after_dropna": int(len(data)),
         "bridges_with_20plus_records": int(len(structure_ids_20)),
-        "constant_20year_bridges_removed": int(len(pd.unique(unchanged_bridges))),
+        "constant_20year_bridges_removed": len(set(unchanged_bridges)),
         "final_rows_used": int(len(ts_df)),
         "final_unique_bridges": int(ts_df["STRUCTURE_NUMBER_008"].nunique())
     }
