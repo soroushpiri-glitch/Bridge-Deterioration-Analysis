@@ -9,6 +9,8 @@ import streamlit as st
 from botocore.exceptions import BotoCoreError, ClientError
 from sklearn.cluster import KMeans
 from scipy.stats import linregress
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 # ---------------------------
 # Config
@@ -617,7 +619,120 @@ def compare_two_clusters(cluster_id_1, cluster_id_2):
 
     return text
 
+def get_cluster_pca_drivers(cluster_id, top_n=8):
+    """
+    Compute PCA for one cluster and return sorted PC1 loadings.
+    This follows the same logic the user used in the notebook:
+    - select bridges in the chosen cluster
+    - subset static data for those bridges
+    - keep numeric columns
+    - remove highly correlated features (>0.85)
+    - drop manually excluded columns
+    - standardize
+    - run PCA
+    - sort PC1 loadings
+    """
+    try:
+        cluster_id = int(cluster_id)
+        top_n = int(top_n)
+    except Exception:
+        return {"text": f"Invalid cluster_id or top_n: cluster_id={cluster_id}, top_n={top_n}"}
 
+    # clustered_df uses STRUCTURE_NUMBER_008 as index and has Cluster column
+    if "Cluster" not in clustered_df.columns:
+        return {"text": "I couldn’t find cluster assignments in the dataset."}
+
+    cluster_subset = clustered_df[clustered_df["Cluster"] == cluster_id].copy()
+
+    if cluster_subset.empty:
+        return {"text": f"No bridges found in cluster {cluster_id}."}
+
+    cluster_subset = cluster_subset.reset_index()
+    bridge_ids = cluster_subset["STRUCTURE_NUMBER_008"].astype(str).tolist()
+
+    # Use the raw static dataframe already loaded in the app
+    cluster_static = static_df[static_df["STRUCTURE_NUMBER_008"].astype(str).isin(bridge_ids)].copy()
+
+    if cluster_static.empty:
+        return {"text": f"I couldn’t find static records for cluster {cluster_id} bridges."}
+
+    cluster_static["Cluster"] = cluster_id
+
+    cols_to_drop = [col for col in ["Unnamed: 0", "Cluster"] if col in cluster_static.columns]
+
+    df_numeric = cluster_static.select_dtypes(include=["number"]).drop(columns=cols_to_drop, errors="ignore")
+
+    if df_numeric.empty:
+        return {"text": f"No numeric PCA input columns were available for cluster {cluster_id}."}
+
+    # correlation filter
+    corr_matrix = df_numeric.corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    to_drop = [column for column in upper.columns if any(upper[column] > 0.85)]
+    df_filtered = df_numeric.drop(columns=to_drop, errors="ignore")
+
+    # manual drop list from your notebook logic
+    manual_drop = [
+        "STRUCTURE_TYPE_043B",
+        "OPERATING_RATING_064",
+        "COUNTY_CODE_003",
+        "APPR_TYPE_044B",
+        "LOWEST_RATING",
+        "SUFFICIENCY_RATING",
+        "STRUCTURE_KIND_043A",
+        "Year of Data"
+    ]
+    df_filtered_2 = df_filtered.drop(columns=manual_drop, errors="ignore")
+
+    if df_filtered_2.shape[1] < 2:
+        return {
+            "text": f"I found partial information, but not enough to answer fully. "
+                    f"Too few PCA variables remained for cluster {cluster_id}."
+        }
+
+    # remove any remaining rows with NA in PCA inputs
+    df_filtered_2 = df_filtered_2.dropna()
+
+    if df_filtered_2.shape[0] < 2:
+        return {
+            "text": f"I found partial information, but not enough to answer fully. "
+                    f"Too few rows remained after cleaning for cluster {cluster_id}."
+        }
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(df_filtered_2)
+
+    pca = PCA()
+    X_pca = pca.fit_transform(X_scaled)
+
+    loadings = pd.DataFrame(pca.components_, columns=df_filtered_2.columns)
+    pc1_sorted = loadings.loc[0].sort_values(ascending=False)
+    # convert sorted PC1 loadings to a table
+    pc1_df = pc1_sorted.reset_index()
+    pc1_df.columns = ["Feature", "PC1_Loading"]
+    top_positive = pc1_sorted.head(top_n)
+    top_negative = pc1_sorted.tail(top_n)
+
+    explained_var = float(pca.explained_variance_ratio_[0]) if len(pca.explained_variance_ratio_) > 0 else np.nan
+
+    positive_lines = [f"- {feature}: {value:.6f}" for feature, value in top_positive.items()]
+    negative_lines = [f"- {feature}: {value:.6f}" for feature, value in top_negative.items()]
+
+    text = (
+        f"PCA results for cluster {cluster_id} based on PC1 loadings:\n\n"
+        f"PC1 explained variance ratio: {explained_var:.4f}\n\n"
+        f"Top positive PC1 loadings:\n" + "\n".join(positive_lines) + "\n\n"
+        f"Top negative PC1 loadings:\n" + "\n".join(negative_lines) + "\n\n"
+        f"Interpretation note: larger absolute PC1 loadings indicate stronger contribution to the first principal component. "
+        f"This does not automatically mean causal deterioration drivers."
+    )
+
+    return {
+        "text": text,
+        "pc1_loadings": pc1_sorted.to_dict(),
+        "pc1_table": pc1_df,
+        "explained_variance_ratio_pc1": explained_var
+    }
 def get_top_deteriorating_bridges(top_n=5):
     subset = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
     subset = subset.sort_values("deterioration_slope_per_year", ascending=True).head(top_n)
@@ -904,6 +1019,22 @@ def get_tool_config():
                     }
                 }
             },
+                        {
+                "toolSpec": {
+                    "name": "cluster_pca_drivers",
+                    "description": "Compute PCA for a selected cluster and return the strongest PC1 feature loadings that characterize that cluster.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "cluster_id": {"type": "integer"},
+                                "top_n": {"type": "integer"}
+                            },
+                            "required": ["cluster_id"]
+                        }
+                    }
+                }
+            },
             {
                 "toolSpec": {
                     "name": "top_deteriorating_bridges",
@@ -1000,6 +1131,11 @@ def execute_tool(tool_name, tool_input):
             "show_compare_clusters_chart": True
         }
 
+    if tool_name == "cluster_pca_drivers":
+        cluster_id = int(tool_input["cluster_id"])
+        top_n = int(tool_input.get("top_n", 8))
+        return get_cluster_pca_drivers(cluster_id, top_n=top_n)
+
     if tool_name == "top_deteriorating_bridges":
         top_n = int(tool_input.get("top_n", 5))
         return {"text": get_top_deteriorating_bridges(top_n=top_n)}
@@ -1045,6 +1181,23 @@ If the answer is partial, say:
 
 You must NEVER answer using your own knowledge.
 If you do not use a tool, your answer is invalid.
+
+Available analyses include:
+- overall dataset summary
+- bridge profile
+- bridge trend
+- compare bridges
+- cluster summary
+- compare clusters
+- top deteriorating bridges
+- top best bridges by year
+- top worst bridges by year
+- PCA-based cluster feature drivers
+
+Important PCA rule:
+- If the user asks about key drivers, important features, PC1 loadings, or what characterizes a cluster, use the PCA tool.
+- Report PCA loadings as feature contributions to PC1.
+- Do not describe PCA loadings as causal unless the data explicitly supports causality.
 """
 
 def ask_bedrock_with_tools(user_prompt):
