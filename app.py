@@ -1416,6 +1416,7 @@ with st.sidebar:
     - Compare bridge {example_1} and {example_2}
     - Summarize cluster 2
     - Compare cluster 2 and cluster 3
+    - What features characterize cluster 5?
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
     - Show the 5 best bridges in 2020
