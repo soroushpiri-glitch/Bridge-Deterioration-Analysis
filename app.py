@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+import io
+import contextlib
+import traceback
 
 from botocore.exceptions import BotoCoreError, ClientError
 from sklearn.cluster import KMeans
@@ -535,6 +538,169 @@ def browse_dataset_rows(offset=0, limit=25, columns=None):
         "browse_df": sliced,
         "total_rows": len(df)
     }
+
+
+def is_safe_python_code(code: str):
+    """
+    Basic safety filter for model-generated analysis code.
+    This is a guardrail, not a hardened sandbox.
+    """
+    banned_patterns = [
+        r"\bimport\s+os\b",
+        r"\bimport\s+sys\b",
+        r"\bimport\s+subprocess\b",
+        r"\bimport\s+requests\b",
+        r"\bimport\s+pathlib\b",
+        r"\bfrom\s+os\b",
+        r"\bfrom\s+sys\b",
+        r"\bfrom\s+subprocess\b",
+        r"\bfrom\s+requests\b",
+        r"\bfrom\s+pathlib\b",
+        r"\bopen\s*\(",
+        r"\beval\s*\(",
+        r"\bexec\s*\(",
+        r"__import__",
+        r"\bcompile\s*\(",
+        r"\bglobals\s*\(",
+        r"\blocals\s*\(",
+        r"\binput\s*\(",
+    ]
+
+    for pattern in banned_patterns:
+        if re.search(pattern, code, flags=re.IGNORECASE):
+            return False, f"Blocked unsafe pattern: {pattern}"
+
+    return True, None
+
+
+def generate_python_analysis_code(user_request: str):
+    code_prompt = f"""
+You are generating Python analysis code for a bridge dataset app.
+
+Available dataframes:
+- static_df
+- bridge_summary
+- pivot_df
+- ts_df
+- clustered_df
+
+Rules:
+- Use only pandas (pd), numpy (np), and matplotlib.pyplot (plt) if needed.
+- Do not import os, sys, subprocess, pathlib, requests, or any network/file libraries.
+- Do not read or write files.
+- Do not call open().
+- Do not use eval() or exec().
+- You may use existing imported objects: pd, np, plt.
+- Store the final natural-language answer in a variable named result_text.
+- Store a step-by-step trace in a variable named execution_steps as a Python list of strings.
+- If returning a table, store it in a variable named result_df.
+- If the question cannot be answered from the available dataframes, set:
+  result_text = "I couldn’t find this information in the dataset."
+- Return only executable Python code. No markdown fences.
+
+User request:
+{user_request}
+"""
+
+    try:
+        response = bedrock.converse(
+            modelId=BEDROCK_MODEL_ID,
+            system=[{"text": "Return only executable Python code."}],
+            messages=[{"role": "user", "content": [{"text": code_prompt}]}]
+        )
+        output_message = response["output"]["message"]
+        code_text = extract_text_from_content_blocks(output_message["content"]).strip()
+        code_text = code_text.replace("```python", "").replace("```", "").strip()
+        return code_text, None
+    except Exception as e:
+        return None, f"Code generation failed: {e}"
+
+
+def run_python_analysis(user_request: str):
+    code_text, code_error = generate_python_analysis_code(user_request)
+    if code_error:
+        return {
+            "text": code_error,
+            "generated_code": None,
+            "execution_steps": None,
+            "analysis_df": None,
+            "stdout": None
+        }
+
+    is_safe, safety_error = is_safe_python_code(code_text)
+    if not is_safe:
+        return {
+            "text": f"Generated code was blocked for safety reasons. {safety_error}",
+            "generated_code": code_text,
+            "execution_steps": None,
+            "analysis_df": None,
+            "stdout": None
+        }
+
+    safe_globals = {
+        "__builtins__": {
+            "len": len,
+            "min": min,
+            "max": max,
+            "sum": sum,
+            "abs": abs,
+            "round": round,
+            "range": range,
+            "enumerate": enumerate,
+            "sorted": sorted,
+            "list": list,
+            "dict": dict,
+            "set": set,
+            "tuple": tuple,
+            "float": float,
+            "int": int,
+            "str": str,
+            "bool": bool,
+            "print": print,
+        },
+        "pd": pd,
+        "np": np,
+        "plt": plt,
+        "static_df": static_df.copy(),
+        "bridge_summary": bridge_summary.copy(),
+        "pivot_df": pivot_df.copy(),
+        "ts_df": ts_df.copy(),
+        "clustered_df": clustered_df.copy(),
+    }
+
+    local_vars = {}
+    stdout_buffer = io.StringIO()
+
+    try:
+        with contextlib.redirect_stdout(stdout_buffer):
+            exec(code_text, safe_globals, local_vars)
+
+        result_text = local_vars.get("result_text", "Python analysis completed, but no result_text was returned.")
+        execution_steps = local_vars.get("execution_steps", [])
+        result_df = local_vars.get("result_df", None)
+
+        if result_df is not None and not isinstance(result_df, pd.DataFrame):
+            try:
+                result_df = pd.DataFrame(result_df)
+            except Exception:
+                result_df = None
+
+        return {
+            "text": result_text,
+            "generated_code": code_text,
+            "execution_steps": execution_steps,
+            "analysis_df": result_df,
+            "stdout": stdout_buffer.getvalue()
+        }
+
+    except Exception as e:
+        return {
+            "text": f"Python analysis execution failed: {e}",
+            "generated_code": code_text,
+            "execution_steps": local_vars.get("execution_steps", []),
+            "analysis_df": None,
+            "stdout": stdout_buffer.getvalue() + "\n" + traceback.format_exc()
+        }
 
 # ---------------------------
 # Analysis functions
@@ -1154,6 +1320,7 @@ Available analyses include:
 - dataset preview
 - inspect a column
 - browse dataset rows
+- python analysis fallback
 
 Important PCA rule:
 - If the user asks about key drivers, important features, PC1 loadings, or what characterizes a cluster, use the PCA tool.
@@ -1163,6 +1330,13 @@ Important PCA rule:
 Dataset inspection rule:
 - If the user asks what columns exist, what values a column contains, what the dataset looks like, what data types are present, or to inspect the dataset, use the dataset inspection tools.
 - If the user asks to browse, inspect, show rows, or explore the table, use the browse dataset rows tool.
+
+Python analysis rule:
+- If the user's request cannot be answered by an existing tool, you may use the python_analysis tool.
+- Only use python_analysis when a more specific existing tool is insufficient.
+- The final answer must come only from executed Python results.
+- Do not guess.
+- Return a traceable summary of the analysis steps.
 """
 
 def extract_text_from_content_blocks(content_blocks):
@@ -1472,6 +1646,21 @@ def get_tool_config():
                         }
                     }
                 }
+            },
+            {
+                "toolSpec": {
+                    "name": "python_analysis",
+                    "description": "Generate and run restricted Python analysis on the loaded bridge dataframes when existing tools are insufficient.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "user_request": {"type": "string"}
+                            },
+                            "required": ["user_request"]
+                        }
+                    }
+                }
             }
         ]
     }
@@ -1561,6 +1750,10 @@ def execute_tool(tool_name, tool_input):
         columns = tool_input.get("columns", None)
         return browse_dataset_rows(offset=offset, limit=limit, columns=columns)
 
+    if tool_name == "python_analysis":
+        user_request = tool_input["user_request"]
+        return run_python_analysis(user_request)
+
     return {"text": f"Unknown tool: {tool_name}"}
 
 # ---------------------------
@@ -1583,6 +1776,10 @@ def ask_bedrock_with_tools(user_prompt):
     pending_values_df = None
     pending_preview_df = None
     pending_browse_df = None
+    pending_analysis_df = None
+    pending_generated_code = None
+    pending_execution_steps = None
+    pending_stdout = None
     loops = 0
     max_loops = 6
 
@@ -1604,7 +1801,11 @@ def ask_bedrock_with_tools(user_prompt):
             "column_df": None,
             "values_df": None,
             "preview_df": None,
-            "browse_df": None
+            "browse_df": None,
+            "analysis_df": None,
+            "generated_code": None,
+            "execution_steps": None,
+            "stdout": None
         }
     except Exception as e:
         return {
@@ -1617,7 +1818,11 @@ def ask_bedrock_with_tools(user_prompt):
             "column_df": None,
             "values_df": None,
             "preview_df": None,
-            "browse_df": None
+            "browse_df": None,
+            "analysis_df": None,
+            "generated_code": None,
+            "execution_steps": None,
+            "stdout": None
         }
 
     while loops < max_loops:
@@ -1638,7 +1843,11 @@ def ask_bedrock_with_tools(user_prompt):
                 pending_column_df is None and
                 pending_values_df is None and
                 pending_preview_df is None and
-                pending_browse_df is None
+                pending_browse_df is None and
+                pending_analysis_df is None and
+                pending_generated_code is None and
+                pending_execution_steps is None and
+                pending_stdout is None
             ):
                 final_text = "I could not generate a final answer."
 
@@ -1652,7 +1861,11 @@ def ask_bedrock_with_tools(user_prompt):
                 "column_df": pending_column_df,
                 "values_df": pending_values_df,
                 "preview_df": pending_preview_df,
-                "browse_df": pending_browse_df
+                "browse_df": pending_browse_df,
+                "analysis_df": pending_analysis_df,
+                "generated_code": pending_generated_code,
+                "execution_steps": pending_execution_steps,
+                "stdout": pending_stdout
             }
 
         if stop_reason == "tool_use":
@@ -1692,6 +1905,18 @@ def ask_bedrock_with_tools(user_prompt):
 
                 if "browse_df" in result:
                     pending_browse_df = result["browse_df"]
+
+                if "analysis_df" in result:
+                    pending_analysis_df = result["analysis_df"]
+
+                if "generated_code" in result:
+                    pending_generated_code = result["generated_code"]
+
+                if "execution_steps" in result:
+                    pending_execution_steps = result["execution_steps"]
+
+                if "stdout" in result:
+                    pending_stdout = result["stdout"]
 
                 if result.get("show_trend_chart"):
                     pending_chart = {
@@ -1744,7 +1969,11 @@ def ask_bedrock_with_tools(user_prompt):
                     "column_df": None,
                     "values_df": None,
                     "preview_df": None,
-                    "browse_df": None
+                    "browse_df": None,
+                    "analysis_df": None,
+                    "generated_code": None,
+                    "execution_steps": None,
+                    "stdout": None
                 }
 
             messages.append({
@@ -1770,7 +1999,11 @@ def ask_bedrock_with_tools(user_prompt):
                     "column_df": pending_column_df,
                     "values_df": pending_values_df,
                     "preview_df": pending_preview_df,
-                    "browse_df": pending_browse_df
+                    "browse_df": pending_browse_df,
+                    "analysis_df": pending_analysis_df,
+                    "generated_code": pending_generated_code,
+                    "execution_steps": pending_execution_steps,
+                    "stdout": pending_stdout
                 }
             except Exception as e:
                 return {
@@ -1783,7 +2016,11 @@ def ask_bedrock_with_tools(user_prompt):
                     "column_df": pending_column_df,
                     "values_df": pending_values_df,
                     "preview_df": pending_preview_df,
-                    "browse_df": pending_browse_df
+                    "browse_df": pending_browse_df,
+                    "analysis_df": pending_analysis_df,
+                    "generated_code": pending_generated_code,
+                    "execution_steps": pending_execution_steps,
+                    "stdout": pending_stdout
                 }
 
             continue
@@ -1798,7 +2035,11 @@ def ask_bedrock_with_tools(user_prompt):
             "column_df": pending_column_df,
             "values_df": pending_values_df,
             "preview_df": pending_preview_df,
-            "browse_df": pending_browse_df
+            "browse_df": pending_browse_df,
+            "analysis_df": pending_analysis_df,
+            "generated_code": pending_generated_code,
+            "execution_steps": pending_execution_steps,
+            "stdout": pending_stdout
         }
 
     return {
@@ -1846,7 +2087,11 @@ def answer_question(question):
             "column_df": result.get("column_df"),
             "values_df": result.get("values_df"),
             "preview_df": result.get("preview_df"),
-            "browse_df": result.get("browse_df")
+            "browse_df": result.get("browse_df"),
+            "analysis_df": result.get("analysis_df"),
+            "generated_code": result.get("generated_code"),
+            "execution_steps": result.get("execution_steps"),
+            "stdout": result.get("stdout")
         }
 
     routed = route_question(question)
@@ -1863,7 +2108,11 @@ def answer_question(question):
             "column_df": None,
             "values_df": None,
             "preview_df": None,
-            "browse_df": None
+            "browse_df": None,
+            "analysis_df": None,
+            "generated_code": None,
+            "execution_steps": None,
+            "stdout": None
         }
 
     if routed["mode"] == "direct_tool":
@@ -1886,7 +2135,11 @@ def answer_question(question):
             "column_df": result.get("column_df"),
             "values_df": result.get("values_df"),
             "preview_df": result.get("preview_df"),
-            "browse_df": result.get("browse_df")
+            "browse_df": result.get("browse_df"),
+            "analysis_df": result.get("analysis_df"),
+            "generated_code": result.get("generated_code"),
+            "execution_steps": result.get("execution_steps"),
+            "stdout": result.get("stdout")
         }
 
     st.session_state.pending_compare_cluster = None
@@ -1902,6 +2155,10 @@ def answer_question(question):
     values_df = result.get("values_df")
     preview_df = result.get("preview_df")
     browse_df = result.get("browse_df")
+    analysis_df = result.get("analysis_df")
+    generated_code = result.get("generated_code")
+    execution_steps = result.get("execution_steps")
+    stdout = result.get("stdout")
 
     if chart:
         if chart["type"] == "trend":
@@ -1923,7 +2180,11 @@ def answer_question(question):
         "column_df": column_df,
         "values_df": values_df,
         "preview_df": preview_df,
-        "browse_df": browse_df
+        "browse_df": browse_df,
+        "analysis_df": analysis_df,
+        "generated_code": generated_code,
+        "execution_steps": execution_steps,
+        "stdout": stdout
     }
 
 # ---------------------------
@@ -1955,21 +2216,20 @@ with st.sidebar:
     - What columns are in the dataset?
     - Show me the first 10 rows of the dataset
     - Browse dataset rows
+    - Inspect the column YEAR_BUILT_027
+    - What values does SERVICE_ON_042A contain?
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
     - Show the 5 best bridges in 2020
     - Give me the profile for bridge {example_3}
     """)
 
-    open_explorer = st.checkbox("Open dataset explorer")
-
-# render in main area, not sidebar
-if open_explorer:
-    render_paginated_dataframe(
-        static_df,
-        key_prefix="main_dataset",
-        title="Full Dataset Explorer"
-    )
+    if st.checkbox("Open dataset explorer"):
+        render_paginated_dataframe(
+            static_df,
+            key_prefix="sidebar_dataset",
+            title="Full Dataset Explorer"
+        )
 
 # ---------------------------
 # Chat history
@@ -2022,6 +2282,24 @@ for idx, message in enumerate(st.session_state.messages):
                 title="Dataset Rows"
             )
 
+
+        if "analysis_df" in message and message["analysis_df"] is not None:
+            st.subheader("Analysis Results")
+            st.dataframe(pd.DataFrame(message["analysis_df"]), use_container_width=True)
+
+        if "execution_steps" in message and message["execution_steps"] is not None:
+            with st.expander("Analysis Steps"):
+                for step in message["execution_steps"]:
+                    st.write(f"- {step}")
+
+        if "generated_code" in message and message["generated_code"] is not None:
+            with st.expander("Generated Python Code"):
+                st.code(message["generated_code"], language="python")
+
+        if "stdout" in message and message["stdout"]:
+            with st.expander("Execution Log"):
+                st.text(message["stdout"])
+
         if "figure_key" in message and message["figure_key"] in st.session_state:
             st.pyplot(st.session_state[message["figure_key"]])
 
@@ -2067,6 +2345,18 @@ if user_prompt:
     if result.get("browse_df") is not None:
         assistant_message["browse_df"] = result["browse_df"].to_dict(orient="records")
 
+    if result.get("analysis_df") is not None:
+        assistant_message["analysis_df"] = result["analysis_df"].to_dict(orient="records")
+
+    if result.get("generated_code") is not None:
+        assistant_message["generated_code"] = result["generated_code"]
+
+    if result.get("execution_steps") is not None:
+        assistant_message["execution_steps"] = result["execution_steps"]
+
+    if result.get("stdout") is not None:
+        assistant_message["stdout"] = result["stdout"]
+
     with st.chat_message("assistant"):
         if result.get("text"):
             st.write(result["text"])
@@ -2105,6 +2395,23 @@ if user_prompt:
                 key_prefix="current_browse",
                 title="Dataset Rows"
             )
+
+        if result.get("analysis_df") is not None:
+            st.subheader("Analysis Results")
+            st.dataframe(result["analysis_df"], use_container_width=True)
+
+        if result.get("execution_steps") is not None:
+            with st.expander("Analysis Steps"):
+                for step in result["execution_steps"]:
+                    st.write(f"- {step}")
+
+        if result.get("generated_code") is not None:
+            with st.expander("Generated Python Code"):
+                st.code(result["generated_code"], language="python")
+
+        if result.get("stdout"):
+            with st.expander("Execution Log"):
+                st.text(result["stdout"])
 
         if result.get("figure") is not None:
             figure_key = f"fig_{len(st.session_state.messages)}"
