@@ -2461,8 +2461,6 @@ with st.sidebar:
     - What columns are in the dataset?
     - Show me the first 10 rows of the dataset
     - Browse dataset rows
-    - Inspect the column YEAR_BUILT_027
-    - What values does SERVICE_ON_042A contain?
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
     - Show me the trend for these 5 bridges
