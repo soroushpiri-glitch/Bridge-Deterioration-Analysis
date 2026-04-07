@@ -6,5 +6,3 @@ scipy
 scikit-learn
 boto3
 botocore
-xlrd
-openpyxl
