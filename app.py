@@ -490,11 +490,11 @@ def get_cluster_summary(cluster_id):
     ]
 
     for col in cols_to_fix:
-    if col in subset.columns:
-        subset[col] = pd.to_numeric(subset[col], errors="coerce")
+        if col in subset.columns:
+            subset[col] = pd.to_numeric(subset[col], errors="coerce")
 
-    if "YEAR_BUILT_027" in subset.columns:
-        subset["YEAR_BUILT_027"] = clean_year_built(subset["YEAR_BUILT_027"])
+        if "YEAR_BUILT_027" in subset.columns:
+            subset["YEAR_BUILT_027"] = clean_year_built(subset["YEAR_BUILT_027"])
 
     metrics = {
         "count": len(subset),
@@ -548,15 +548,15 @@ def compare_two_clusters(cluster_id_1, cluster_id_2):
     ]
 
     for col in cols_to_fix:
-    if col in subset1.columns:
-        subset1[col] = pd.to_numeric(subset1[col], errors="coerce")
-    if col in subset2.columns:
-        subset2[col] = pd.to_numeric(subset2[col], errors="coerce")
+        if col in subset1.columns:
+            subset1[col] = pd.to_numeric(subset1[col], errors="coerce")
+        if col in subset2.columns:
+            subset2[col] = pd.to_numeric(subset2[col], errors="coerce")
 
-    if "YEAR_BUILT_027" in subset1.columns:
-        subset1["YEAR_BUILT_027"] = clean_year_built(subset1["YEAR_BUILT_027"])
-    if "YEAR_BUILT_027" in subset2.columns:
-        subset2["YEAR_BUILT_027"] = clean_year_built(subset2["YEAR_BUILT_027"])
+        if "YEAR_BUILT_027" in subset1.columns:
+            subset1["YEAR_BUILT_027"] = clean_year_built(subset1["YEAR_BUILT_027"])
+        if "YEAR_BUILT_027" in subset2.columns:
+            subset2["YEAR_BUILT_027"] = clean_year_built(subset2["YEAR_BUILT_027"])
 
     metrics1 = {
         "count": len(subset1),
@@ -1326,7 +1326,7 @@ def ask_bedrock_with_tools(user_prompt):
                 "text": final_text,
                 "chart": pending_chart,
                 "summary_df": pending_summary_df,
-                "cluster_df": pending_cluster_df
+                "cluster_df": pending_cluster_df,
                 "pc1_table": pending_pc1_table
             }
 
@@ -1579,7 +1579,7 @@ if user_prompt:
     }
 
     if result.get("pc1_table") is not None:
-    assistant_message["pc1_table"] = result["pc1_table"].to_dict(orient="records")
+        assistant_message["pc1_table"] = result["pc1_table"].to_dict(orient="records")
 
     if result.get("summary_df") is not None:
         assistant_message["summary_df"] = result["summary_df"].to_dict(orient="records")
