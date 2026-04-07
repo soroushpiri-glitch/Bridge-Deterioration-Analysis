@@ -336,6 +336,57 @@ def clean_year_built(series):
     return s
 
 
+def make_json_safe(obj):
+    """
+    Recursively convert objects into Bedrock-safe JSON values.
+    Handles pandas, numpy, NaN, inf, timestamps, and nested structures.
+    """
+    if obj is None:
+        return None
+
+    if isinstance(obj, pd.DataFrame):
+        return [make_json_safe(record) for record in obj.to_dict(orient="records")]
+
+    if isinstance(obj, pd.Series):
+        return make_json_safe(obj.to_dict())
+
+    if isinstance(obj, dict):
+        return {str(k): make_json_safe(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple, set)):
+        return [make_json_safe(v) for v in obj]
+
+    try:
+        if pd.isna(obj):
+            return None
+    except Exception:
+        pass
+
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+
+    if isinstance(obj, (np.floating,)):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return float(obj)
+
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+
+    if isinstance(obj, float):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return obj
+
+    if isinstance(obj, (str, int, bool)):
+        return obj
+
+    return str(obj)
+
+
 def render_paginated_dataframe(df, key_prefix="data_viewer", title="Data Explorer"):
     if df is None or df.empty:
         st.info("No data to display.")
@@ -1944,12 +1995,7 @@ def ask_bedrock_with_tools(user_prompt):
                         "cluster_id_2": result["cluster_id_2"]
                     }
 
-                json_safe_result = {}
-                for key, value in result.items():
-                    if isinstance(value, pd.DataFrame):
-                        json_safe_result[key] = value.to_dict(orient="records")
-                    else:
-                        json_safe_result[key] = value
+                json_safe_result = make_json_safe(result)
 
                 tool_result_content.append({
                     "toolResult": {
@@ -2052,7 +2098,11 @@ def ask_bedrock_with_tools(user_prompt):
         "column_df": pending_column_df,
         "values_df": pending_values_df,
         "preview_df": pending_preview_df,
-        "browse_df": pending_browse_df
+        "browse_df": pending_browse_df,
+        "analysis_df": pending_analysis_df,
+        "generated_code": pending_generated_code,
+        "execution_steps": pending_execution_steps,
+        "stdout": pending_stdout
     }
 
 
@@ -2224,12 +2274,15 @@ with st.sidebar:
     - Give me the profile for bridge {example_3}
     """)
 
-    if st.checkbox("Open dataset explorer"):
-        render_paginated_dataframe(
-            static_df,
-            key_prefix="sidebar_dataset",
-            title="Full Dataset Explorer"
-        )
+    open_explorer = st.checkbox("Open dataset explorer")
+
+# render in main area, not sidebar
+if open_explorer:
+    render_paginated_dataframe(
+        static_df,
+        key_prefix="main_dataset",
+        title="Full Dataset Explorer"
+    )
 
 # ---------------------------
 # Chat history
