@@ -60,7 +60,7 @@ def read_table_file(file_path: str) -> pd.DataFrame:
         raise FileNotFoundError(f"File not found: {file_path}")
 
     if ext == ".csv":
-        return pd.read_csv(file_path, low_memory=False)
+        return pd.read_csv(file_path, sep=",", header=0, low_memory=False)
 
     if ext == ".xlsx":
         return pd.read_excel(file_path, engine="openpyxl")
@@ -73,10 +73,10 @@ def read_table_file(file_path: str) -> pd.DataFrame:
                 return pd.read_excel(file_path, engine="openpyxl")
             except Exception:
                 try:
-                    return pd.read_csv(file_path, low_memory=False)
+                    return pd.read_csv(file_path, sep=",", header=0, low_memory=False)
                 except Exception:
                     try:
-                        return pd.read_csv(file_path, sep="\t", low_memory=False)
+                        return pd.read_csv(file_path, sep="\t", header=0, low_memory=False)
                     except Exception:
                         raise ValueError(
                             f"Could not read '{file_path}'. "
@@ -87,7 +87,7 @@ def read_table_file(file_path: str) -> pd.DataFrame:
     raise ValueError(f"Unsupported file type: {ext}")
 
 # ---------------------------
-# Load raw data
+# Load raw data only
 # ---------------------------
 @st.cache_data
 def load_data():
@@ -106,7 +106,10 @@ def load_data():
     required_cols = [
         "Year of Data",
         "STRUCTURE_NUMBER_008",
-        "Bridge Health Index (Overall)"
+        "Bridge Health Index (Overall)",
+        "Bridge Health Index (Deck)",
+        "Bridge Health Index (Super)",
+        "Bridge Health Index (Sub)"
     ]
     missing_cols = [c for c in required_cols if c not in static_df.columns]
 
@@ -114,44 +117,20 @@ def load_data():
         st.error(f"Static file is missing required columns: {missing_cols}")
         st.stop()
 
-    numeric_cols_static = [
-        "Year of Data",
-        "Bridge Health Index (Overall)",
-        "Bridge Health Index (Deck)",
-        "Bridge Health Index (Super)",
-        "Bridge Health Index (Sub)",
-        "COUNTY_CODE_003",
-        "YEAR_BUILT_027",
-        "TRAFFIC_LANES_ON_028A",
-        "ADT_029",
-        "YEAR_ADT_030",
-        "MAIN_UNIT_SPANS_045",
-        "MAX_SPAN_LEN_MT_048",
-        "STRUCTURE_LEN_MT_049",
-        "DECK_WIDTH_MT_052",
-        "LAT_016",
-        "LONG_017"
-    ]
-
-    for col in numeric_cols_static:
-        if col in static_df.columns:
-            static_df[col] = pd.to_numeric(static_df[col], errors="coerce")
-
-    static_df["STRUCTURE_NUMBER_008"] = static_df["STRUCTURE_NUMBER_008"].astype(str).str.strip()
-    static_df = static_df.dropna(subset=["STRUCTURE_NUMBER_008", "Year of Data"])
-    static_df["Year of Data"] = static_df["Year of Data"].astype(int)
-
     return static_df
 
 # ---------------------------
-# Prepare analysis using the SAME logic as notebook
+# Prepare analysis
+# EXACT original notebook logic
 # ---------------------------
 @st.cache_data
 def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
-    # ==========================================
-    # STEP 1: Keep needed columns
-    # ==========================================
-    df = static_df[[
+    # exact original logic
+    data = static_df.copy()
+    data = data.dropna()
+
+    # Select relevant columns
+    df_full = data[[
         "Year of Data",
         "STRUCTURE_NUMBER_008",
         "Bridge Health Index (Overall)",
@@ -160,32 +139,25 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
         "Bridge Health Index (Sub)"
     ]].copy()
 
-    df = df.dropna(subset=[
-        "Year of Data",
-        "STRUCTURE_NUMBER_008",
-        "Bridge Health Index (Overall)"
-    ])
+    # Count appearances of each bridge
+    counts = df_full["STRUCTURE_NUMBER_008"].value_counts()
 
-    # ==========================================
-    # STEP 2: Keep bridges with >= 20 records
-    # ==========================================
-    counts = df["STRUCTURE_NUMBER_008"].value_counts()
-    structure_ids_20 = counts[counts >= 20].index
-    df_filtered = df[df["STRUCTURE_NUMBER_008"].isin(structure_ids_20)].copy()
+    # Keep only bridges with at least 20 records
+    structure_ids_20 = counts[(counts >= 20)].index
+    df_filtered = df_full[df_full["STRUCTURE_NUMBER_008"].isin(structure_ids_20)].copy()
 
-    # ==========================================
-    # STEP 3: Remove bridges with constant BHI
-    # for 20 consecutive years
-    # ==========================================
+    # Keep only needed columns and drop missing values
     df_check = df_filtered[[
         "STRUCTURE_NUMBER_008",
         "Year of Data",
         "Bridge Health Index (Overall)"
     ]].dropna().copy()
 
-    df_check["Year of Data"] = df_check["Year of Data"].astype(int)
+    # Sort for consistent processing
     df_check = df_check.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"])
+    df_check["Year of Data"] = df_check["Year of Data"].astype(int)
 
+    # Find bridges with constant health index for 20 consecutive years
     unchanged_bridges = []
 
     for bridge_id, group in df_check.groupby("STRUCTURE_NUMBER_008"):
@@ -193,56 +165,53 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
         years = group["Year of Data"].tolist()
         values = group["Bridge Health Index (Overall)"].tolist()
 
-        for i in range(len(values) - 19):
-            same_values = all(v == values[i] for v in values[i:i+20])
-            consecutive_years = all(
-                y2 - y1 == 1 for y1, y2 in zip(years[i:i+19], years[i+1:i+20])
-            )
-
-            if same_values and consecutive_years:
+        # keep exact original logic
+        for i in range(len(values) - 20):
+            if all(v == values[i] for v in values[i:i+20]) and \
+               all(y2 - y1 == 1 for y1, y2 in zip(years[i:i+19], years[i+1:i+20])):
                 unchanged_bridges.append(bridge_id)
                 break
 
+    # Keep only bridges found as unchanged
+    result_df = df_check[df_check["STRUCTURE_NUMBER_008"].isin(unchanged_bridges)].copy()
+
+    # Remove unchanged bridges from original filtered dataframe
+    unique_structures = result_df["STRUCTURE_NUMBER_008"].unique()
     df_filtered_cleaned = df_filtered[
-        ~df_filtered["STRUCTURE_NUMBER_008"].isin(unchanged_bridges)
+        ~df_filtered["STRUCTURE_NUMBER_008"].isin(unique_structures)
     ].copy()
 
-    # This becomes the time-series dataset used downstream
+    # this corresponds to your data_2
     ts_df = df_filtered_cleaned.copy()
 
-    # ==========================================
-    # STEP 4: Pivot and fill missing values
-    # ==========================================
-    df_ts = ts_df[[
+    # Build clustering dataframe
+    df_cluster = ts_df[[
         "STRUCTURE_NUMBER_008",
         "Year of Data",
         "Bridge Health Index (Overall)"
     ]].dropna()
 
-    pivot_df = df_ts.pivot(
+    pivot_df = df_cluster.pivot(
         index="STRUCTURE_NUMBER_008",
         columns="Year of Data",
         values="Bridge Health Index (Overall)"
     )
 
-    pivot_df = pivot_df.sort_index(axis=1)
-    pivot_df = pivot_df.interpolate(axis=1, limit_direction="both").ffill(axis=1).bfill(axis=1)
+    pivot_df = pivot_df.sort_index(axis=1).interpolate(
+        axis=1,
+        limit_direction="both"
+    ).ffill(axis=1).bfill(axis=1)
 
     filtered_df = pivot_df.copy()
 
-    # ==========================================
-    # STEP 5: KMeans clustering (same notebook logic)
-    # no standardization for final clustering
-    # ==========================================
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    # exact clustering style from your original code
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
     cluster_labels = kmeans.fit_predict(filtered_df)
 
     clustered = pivot_df.copy()
     clustered["Cluster"] = cluster_labels
 
-    # ==========================================
-    # STEP 6: Bridge slopes
-    # ==========================================
+    # slope calculation for app features
     slopes = []
     for bridge_id, row in pivot_df.iterrows():
         y = row.values.astype(float)
@@ -260,12 +229,10 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
 
     slope_df = pd.DataFrame(slopes)
 
-    # ==========================================
-    # STEP 7: Merge summary with latest bridge data
-    # ==========================================
     cluster_df = clustered[["Cluster"]].reset_index()
     bridge_summary = cluster_df.merge(slope_df, on="STRUCTURE_NUMBER_008", how="left")
 
+    # latest bridge info from raw file
     latest_static = (
         static_df.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"])
         .groupby("STRUCTURE_NUMBER_008", as_index=False)
@@ -282,10 +249,9 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
     cluster_sizes = bridge_summary["Cluster"].value_counts().sort_index()
 
     preprocessing_summary = {
-        "raw_rows": int(len(static_df)),
-        "rows_after_required_fields": int(len(df)),
+        "raw_rows_after_dropna": int(len(data)),
         "bridges_with_20plus_records": int(len(structure_ids_20)),
-        "constant_20year_bridges_removed": int(len(set(unchanged_bridges))),
+        "constant_20year_bridges_removed": int(len(pd.unique(unchanged_bridges))),
         "final_rows_used": int(len(ts_df)),
         "final_unique_bridges": int(ts_df["STRUCTURE_NUMBER_008"].nunique())
     }
@@ -373,11 +339,11 @@ def overall_dataset_summary():
             "End Year",
             "Number of Clusters",
             "Average Deterioration Slope",
-            "Raw Input Rows",
-            "Rows After Required Fields Filter",
+            "Raw Rows After dropna()",
             "Bridges With 20+ Records",
             "Constant 20-Year Bridges Removed",
-            "Final Rows Used"
+            "Final Rows Used",
+            "Final Unique Bridges"
         ],
         "Value": [
             total_bridges,
@@ -385,11 +351,11 @@ def overall_dataset_summary():
             year_max,
             N_CLUSTERS,
             round(avg_slope, 4) if pd.notna(avg_slope) else np.nan,
-            preprocessing_summary["raw_rows"],
-            preprocessing_summary["rows_after_required_fields"],
+            preprocessing_summary["raw_rows_after_dropna"],
             preprocessing_summary["bridges_with_20plus_records"],
             preprocessing_summary["constant_20year_bridges_removed"],
-            preprocessing_summary["final_rows_used"]
+            preprocessing_summary["final_rows_used"],
+            preprocessing_summary["final_unique_bridges"]
         ]
     })
 
@@ -404,8 +370,8 @@ def overall_dataset_summary():
         f"Here is the overall summary of the bridge deterioration dataset:\n\n"
         f"Total bridges used for clustering: {total_bridges:,}\n"
         f"Data span: {year_min} to {year_max}\n"
-        f"Clusters: {N_CLUSTERS} clusters using KMeans on BHI trajectories\n"
-        f"Bridges with >=20 records before removal: {preprocessing_summary['bridges_with_20plus_records']:,}\n"
+        f"Clusters: {N_CLUSTERS} clusters using KMeans on raw interpolated BHI trajectories\n"
+        f"Bridges with >=20 records: {preprocessing_summary['bridges_with_20plus_records']:,}\n"
         f"Constant 20-year bridges removed: {preprocessing_summary['constant_20year_bridges_removed']:,}\n"
         f"Cluster sizes:\n" + "\n".join(cluster_lines) + "\n"
         f"Average deterioration slope: {avg_slope_text} BHI points per year\n\n"
@@ -677,14 +643,16 @@ You answer questions about steel bridge Bridge Health Index (BHI) time-series da
 bridge-level deterioration trends, and KMeans clustering results.
 
 Important:
-- The app preprocesses raw bridge data before clustering:
-  1) keeps bridges with at least 20 records
-  2) removes bridges whose overall BHI stays constant for 20 consecutive years
-  3) pivots the cleaned time-series
-  4) interpolates/fills missing values
-  5) applies KMeans clustering to the raw interpolated trajectories
-- The clustering was performed without standardization.
+- The app follows this preprocessing pipeline before clustering:
+  1) read STEEL_Bridges.csv
+  2) apply dropna() to the full dataframe
+  3) keep bridges with at least 20 records
+  4) remove bridges with constant overall BHI for 20 consecutive years
+  5) pivot remaining overall BHI time-series by year
+  6) interpolate/fill missing values
+  7) apply KMeans clustering on the raw interpolated trajectories
 - The number of clusters is {N_CLUSTERS}.
+- Do not claim any additional preprocessing beyond this.
 
 Available analysis concepts:
 - bridge profile
@@ -1086,7 +1054,7 @@ example_3 = example_ids[2] if len(example_ids) > 2 else example_1
 
 with st.sidebar:
     st.subheader("Dataset")
-    st.write(f"Raw bridge records: {len(static_df):,}")
+    st.write(f"Raw rows after dropna(): {preprocessing_summary['raw_rows_after_dropna']:,}")
     st.write(f"Processed time-series records: {len(ts_df):,}")
     st.write(f"Usable bridges after preprocessing: {pivot_df.shape[0]:,}")
     st.write(f"Years: {min(years_available)}–{max(years_available)}")
