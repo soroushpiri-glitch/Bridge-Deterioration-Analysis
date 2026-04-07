@@ -813,6 +813,11 @@ def answer_question(question):
 # ---------------------------
 # Sidebar
 # ---------------------------
+example_ids = bridge_ids[:3]
+example_1 = example_ids[0] if len(example_ids) > 0 else "N/A"
+example_2 = example_ids[1] if len(example_ids) > 1 else example_1
+example_3 = example_ids[2] if len(example_ids) > 2 else example_1
+
 with st.sidebar:
     st.subheader("Dataset")
     st.write(f"Bridge records: {len(static_df):,}")
@@ -820,16 +825,17 @@ with st.sidebar:
     st.write(f"Usable bridges: {pivot_df.shape[0]:,}")
     st.write(f"Years: {min(years_available)}–{max(years_available)}")
     st.write(f"AWS Region: {AWS_REGION}")
+    st.caption("Use a bridge ID from STRUCTURE_NUMBER_008")
     st.write("Example questions:")
-    st.markdown("""
+    st.markdown(f"""
     - Give me an overview of the bridge deterioration dataset
-    - Show trend for bridge 000000000001234
-    - Compare bridge 000000000001234 and 000000000009876
+    - Show trend for bridge {example_1}
+    - Compare bridge {example_1} and {example_2}
     - Summarize cluster 2
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
     - Show the 5 best bridges in 2020
-    - Give me the profile for bridge 000000000001234
+    - Give me the profile for bridge {example_3}
     """)
 
 # ---------------------------
