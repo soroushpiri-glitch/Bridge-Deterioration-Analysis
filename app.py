@@ -13,7 +13,7 @@ from scipy.stats import linregress
 # Config
 # ---------------------------
 N_CLUSTERS = 6
-TS_FILE = "Steel_Bridges_20_and_Over_20_TimeSeries_Data_revised.csv"
+TS_FILE = "Steel_Bridges_20_and_Over_20_TimeSeries_Data.csv"
 STATIC_FILE = "STEEL_Bridges.csv"
 
 # ---------------------------
@@ -110,7 +110,9 @@ def load_data():
 
 @st.cache_data
 def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
-    # Match original notebook logic
+    # Match original notebook logic more closely:
+    # pivot BHI overall by bridge and year, interpolate/fill missing values,
+    # then run KMeans directly on the raw filled pivot table (no scaling)
     df = ts_df[[
         "STRUCTURE_NUMBER_008",
         "Year of Data",
@@ -123,13 +125,10 @@ def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
         values="Bridge Health Index (Overall)"
     )
 
-    pivot_df = pivot_df.sort_index(axis=1)
-    pivot_df = pivot_df.interpolate(axis=1, limit_direction="both").ffill(axis=1).bfill(axis=1)
+    pivot_df = pivot_df.sort_index(axis=1).interpolate(axis=1, limit_direction="both").ffill(axis=1).bfill(axis=1)
 
-    # IMPORTANT: no scaling here, to match original notebook
     filtered_df = pivot_df.copy()
 
-    # Match notebook KMeans setup
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
     cluster_labels = kmeans.fit_predict(filtered_df)
 
@@ -384,7 +383,7 @@ def get_cluster_summary(cluster_id):
     metrics = {
         "count": len(subset),
         "avg_latest_overall_bhi": subset["Bridge Health Index (Overall)"].mean(),
-        "avg_deck_bhi": subset["Bridge Health Index (Deck)"].mean(),
+        "avg_deck_bhi": subset["Bridge Health Index (Deck)"].mean() if "Bridge Health Index (Deck)" in subset.columns else np.nan,
         "avg_super_bhi": subset["Bridge Health Index (Super)"].mean(),
         "avg_sub_bhi": subset["Bridge Health Index (Sub)"].mean(),
         "avg_year_built": subset["YEAR_BUILT_027"].mean(),
