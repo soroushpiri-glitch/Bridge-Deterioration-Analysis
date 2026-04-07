@@ -332,6 +332,80 @@ def clean_year_built(series):
     s[(s < 1800) | (s > 2100)] = np.nan
     return s
 
+
+def render_paginated_dataframe(df, key_prefix="data_viewer", title="Data Explorer"):
+    if df is None or df.empty:
+        st.info("No data to display.")
+        return
+
+    st.subheader(title)
+
+    total_rows = len(df)
+
+    page_key = f"{key_prefix}_page"
+    page_size_key = f"{key_prefix}_page_size"
+    cols_key = f"{key_prefix}_columns"
+
+    if page_key not in st.session_state:
+        st.session_state[page_key] = 0
+    if page_size_key not in st.session_state:
+        st.session_state[page_size_key] = 25
+    if cols_key not in st.session_state:
+        st.session_state[cols_key] = list(df.columns)
+
+    control_col1, control_col2 = st.columns([1, 2])
+
+    with control_col1:
+        page_size = st.selectbox(
+            "Rows per page",
+            options=[10, 25, 50, 100],
+            index=[10, 25, 50, 100].index(st.session_state[page_size_key]) if st.session_state[page_size_key] in [10, 25, 50, 100] else 1,
+            key=page_size_key
+        )
+
+    with control_col2:
+        selected_cols = st.multiselect(
+            "Columns to display",
+            options=list(df.columns),
+            default=st.session_state[cols_key],
+            key=cols_key
+        )
+
+    if not selected_cols:
+        st.warning("Select at least one column.")
+        return
+
+    total_pages = max(1, int(np.ceil(total_rows / page_size)))
+
+    if st.session_state[page_key] >= total_pages:
+        st.session_state[page_key] = total_pages - 1
+    if st.session_state[page_key] < 0:
+        st.session_state[page_key] = 0
+
+    nav1, nav2, nav3 = st.columns([1, 1, 3])
+
+    with nav1:
+        if st.button("⬅ Previous", key=f"{key_prefix}_prev", disabled=(st.session_state[page_key] == 0)):
+            st.session_state[page_key] -= 1
+
+    with nav2:
+        if st.button("Next ➡", key=f"{key_prefix}_next", disabled=(st.session_state[page_key] >= total_pages - 1)):
+            st.session_state[page_key] += 1
+
+    with nav3:
+        st.write(f"Page {st.session_state[page_key] + 1} of {total_pages} | Rows: {total_rows:,}")
+
+    start_idx = st.session_state[page_key] * page_size
+    end_idx = min(start_idx + page_size, total_rows)
+
+    page_df = df.iloc[start_idx:end_idx][selected_cols]
+
+    st.dataframe(
+        page_df,
+        use_container_width=True,
+        height=500
+    )
+
 # ---------------------------
 # Dataset inspection functions
 # ---------------------------
@@ -440,6 +514,26 @@ def preview_dataset(n_rows=10):
     return {
         "text": f"Showing the first {len(df)} rows of the dataset.",
         "preview_df": df
+    }
+
+
+def browse_dataset_rows(offset=0, limit=25, columns=None):
+    df = static_df.copy()
+
+    offset = max(0, int(offset))
+    limit = max(1, int(limit))
+
+    if columns:
+        valid_cols = [c for c in columns if c in df.columns]
+        if valid_cols:
+            df = df[valid_cols]
+
+    sliced = df.iloc[offset:offset + limit].copy()
+
+    return {
+        "text": f"Showing rows {offset + 1} to {min(offset + limit, len(df))} of {len(df):,}.",
+        "browse_df": sliced,
+        "total_rows": len(df)
     }
 
 # ---------------------------
@@ -1059,6 +1153,7 @@ Available analyses include:
 - dataset schema
 - dataset preview
 - inspect a column
+- browse dataset rows
 
 Important PCA rule:
 - If the user asks about key drivers, important features, PC1 loadings, or what characterizes a cluster, use the PCA tool.
@@ -1067,6 +1162,7 @@ Important PCA rule:
 
 Dataset inspection rule:
 - If the user asks what columns exist, what values a column contains, what the dataset looks like, what data types are present, or to inspect the dataset, use the dataset inspection tools.
+- If the user asks to browse, inspect, show rows, or explore the table, use the browse dataset rows tool.
 """
 
 def extract_text_from_content_blocks(content_blocks):
@@ -1138,6 +1234,23 @@ def route_question(question: str):
                 "cluster_id_1": cluster_ids[0],
                 "cluster_id_2": cluster_ids[1]
             }
+        }
+
+    if any(phrase in q for phrase in [
+        "show dataset",
+        "inspect dataset",
+        "inspect data",
+        "browse dataset",
+        "browse data",
+        "show rows",
+        "show table",
+        "explore dataset",
+        "let me inspect the data"
+    ]):
+        return {
+            "mode": "direct_tool",
+            "tool_name": "browse_dataset_rows",
+            "tool_input": {"offset": 0, "limit": 100}
         }
 
     return {"mode": "bedrock"}
@@ -1340,6 +1453,25 @@ def get_tool_config():
                         }
                     }
                 }
+            },
+            {
+                "toolSpec": {
+                    "name": "browse_dataset_rows",
+                    "description": "Browse rows of the dataset with optional offset, limit, and selected columns.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "offset": {"type": "integer"},
+                                "limit": {"type": "integer"},
+                                "columns": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                }
             }
         ]
     }
@@ -1423,6 +1555,12 @@ def execute_tool(tool_name, tool_input):
         n_rows = int(tool_input.get("n_rows", 10))
         return preview_dataset(n_rows=n_rows)
 
+    if tool_name == "browse_dataset_rows":
+        offset = int(tool_input.get("offset", 0))
+        limit = int(tool_input.get("limit", 25))
+        columns = tool_input.get("columns", None)
+        return browse_dataset_rows(offset=offset, limit=limit, columns=columns)
+
     return {"text": f"Unknown tool: {tool_name}"}
 
 # ---------------------------
@@ -1444,6 +1582,7 @@ def ask_bedrock_with_tools(user_prompt):
     pending_column_df = None
     pending_values_df = None
     pending_preview_df = None
+    pending_browse_df = None
     loops = 0
     max_loops = 6
 
@@ -1464,7 +1603,8 @@ def ask_bedrock_with_tools(user_prompt):
             "schema_df": None,
             "column_df": None,
             "values_df": None,
-            "preview_df": None
+            "preview_df": None,
+            "browse_df": None
         }
     except Exception as e:
         return {
@@ -1476,7 +1616,8 @@ def ask_bedrock_with_tools(user_prompt):
             "schema_df": None,
             "column_df": None,
             "values_df": None,
-            "preview_df": None
+            "preview_df": None,
+            "browse_df": None
         }
 
     while loops < max_loops:
@@ -1496,7 +1637,8 @@ def ask_bedrock_with_tools(user_prompt):
                 pending_schema_df is None and
                 pending_column_df is None and
                 pending_values_df is None and
-                pending_preview_df is None
+                pending_preview_df is None and
+                pending_browse_df is None
             ):
                 final_text = "I could not generate a final answer."
 
@@ -1509,7 +1651,8 @@ def ask_bedrock_with_tools(user_prompt):
                 "schema_df": pending_schema_df,
                 "column_df": pending_column_df,
                 "values_df": pending_values_df,
-                "preview_df": pending_preview_df
+                "preview_df": pending_preview_df,
+                "browse_df": pending_browse_df
             }
 
         if stop_reason == "tool_use":
@@ -1546,6 +1689,9 @@ def ask_bedrock_with_tools(user_prompt):
 
                 if "preview_df" in result:
                     pending_preview_df = result["preview_df"]
+
+                if "browse_df" in result:
+                    pending_browse_df = result["browse_df"]
 
                 if result.get("show_trend_chart"):
                     pending_chart = {
@@ -1597,7 +1743,8 @@ def ask_bedrock_with_tools(user_prompt):
                     "schema_df": None,
                     "column_df": None,
                     "values_df": None,
-                    "preview_df": None
+                    "preview_df": None,
+                    "browse_df": None
                 }
 
             messages.append({
@@ -1622,7 +1769,8 @@ def ask_bedrock_with_tools(user_prompt):
                     "schema_df": pending_schema_df,
                     "column_df": pending_column_df,
                     "values_df": pending_values_df,
-                    "preview_df": pending_preview_df
+                    "preview_df": pending_preview_df,
+                    "browse_df": pending_browse_df
                 }
             except Exception as e:
                 return {
@@ -1634,7 +1782,8 @@ def ask_bedrock_with_tools(user_prompt):
                     "schema_df": pending_schema_df,
                     "column_df": pending_column_df,
                     "values_df": pending_values_df,
-                    "preview_df": pending_preview_df
+                    "preview_df": pending_preview_df,
+                    "browse_df": pending_browse_df
                 }
 
             continue
@@ -1648,7 +1797,8 @@ def ask_bedrock_with_tools(user_prompt):
             "schema_df": pending_schema_df,
             "column_df": pending_column_df,
             "values_df": pending_values_df,
-            "preview_df": pending_preview_df
+            "preview_df": pending_preview_df,
+            "browse_df": pending_browse_df
         }
 
     return {
@@ -1660,7 +1810,8 @@ def ask_bedrock_with_tools(user_prompt):
         "schema_df": pending_schema_df,
         "column_df": pending_column_df,
         "values_df": pending_values_df,
-        "preview_df": pending_preview_df
+        "preview_df": pending_preview_df,
+        "browse_df": pending_browse_df
     }
 
 
@@ -1694,7 +1845,8 @@ def answer_question(question):
             "schema_df": result.get("schema_df"),
             "column_df": result.get("column_df"),
             "values_df": result.get("values_df"),
-            "preview_df": result.get("preview_df")
+            "preview_df": result.get("preview_df"),
+            "browse_df": result.get("browse_df")
         }
 
     routed = route_question(question)
@@ -1710,7 +1862,8 @@ def answer_question(question):
             "schema_df": None,
             "column_df": None,
             "values_df": None,
-            "preview_df": None
+            "preview_df": None,
+            "browse_df": None
         }
 
     if routed["mode"] == "direct_tool":
@@ -1732,7 +1885,8 @@ def answer_question(question):
             "schema_df": result.get("schema_df"),
             "column_df": result.get("column_df"),
             "values_df": result.get("values_df"),
-            "preview_df": result.get("preview_df")
+            "preview_df": result.get("preview_df"),
+            "browse_df": result.get("browse_df")
         }
 
     st.session_state.pending_compare_cluster = None
@@ -1747,6 +1901,7 @@ def answer_question(question):
     column_df = result.get("column_df")
     values_df = result.get("values_df")
     preview_df = result.get("preview_df")
+    browse_df = result.get("browse_df")
 
     if chart:
         if chart["type"] == "trend":
@@ -1767,7 +1922,8 @@ def answer_question(question):
         "schema_df": schema_df,
         "column_df": column_df,
         "values_df": values_df,
-        "preview_df": preview_df
+        "preview_df": preview_df,
+        "browse_df": browse_df
     }
 
 # ---------------------------
@@ -1798,11 +1954,21 @@ with st.sidebar:
     - What features characterize cluster 5?
     - What columns are in the dataset?
     - Show me the first 10 rows of the dataset
+    - Browse dataset rows
+    - Inspect the column YEAR_BUILT_027
+    - What values does SERVICE_ON_042A contain?
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
     - Show the 5 best bridges in 2020
     - Give me the profile for bridge {example_3}
     """)
+
+    if st.checkbox("Open dataset explorer"):
+        render_paginated_dataframe(
+            static_df,
+            key_prefix="sidebar_dataset",
+            title="Full Dataset Explorer"
+        )
 
 # ---------------------------
 # Chat history
@@ -1811,11 +1977,11 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": "Ask me about bridge deterioration trends, bridge profiles, clusters, Bridge Health Index patterns, or inspect the dataset structure and columns."
+            "content": "Ask me about bridge deterioration trends, bridge profiles, clusters, Bridge Health Index patterns, or inspect and browse the dataset."
         }
     ]
 
-for message in st.session_state.messages:
+for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         if message.get("content"):
             st.write(message["content"])
@@ -1847,6 +2013,13 @@ for message in st.session_state.messages:
         if "preview_df" in message and message["preview_df"] is not None:
             st.subheader("Dataset Preview")
             st.dataframe(pd.DataFrame(message["preview_df"]), use_container_width=True)
+
+        if "browse_df" in message and message["browse_df"] is not None:
+            render_paginated_dataframe(
+                pd.DataFrame(message["browse_df"]),
+                key_prefix=f"history_browse_{idx}",
+                title="Dataset Rows"
+            )
 
         if "figure_key" in message and message["figure_key"] in st.session_state:
             st.pyplot(st.session_state[message["figure_key"]])
@@ -1890,6 +2063,9 @@ if user_prompt:
     if result.get("preview_df") is not None:
         assistant_message["preview_df"] = result["preview_df"].to_dict(orient="records")
 
+    if result.get("browse_df") is not None:
+        assistant_message["browse_df"] = result["browse_df"].to_dict(orient="records")
+
     with st.chat_message("assistant"):
         if result.get("text"):
             st.write(result["text"])
@@ -1921,6 +2097,13 @@ if user_prompt:
         if result.get("preview_df") is not None:
             st.subheader("Dataset Preview")
             st.dataframe(result["preview_df"], use_container_width=True)
+
+        if result.get("browse_df") is not None:
+            render_paginated_dataframe(
+                result["browse_df"],
+                key_prefix="current_browse",
+                title="Dataset Rows"
+            )
 
         if result.get("figure") is not None:
             figure_key = f"fig_{len(st.session_state.messages)}"
