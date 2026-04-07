@@ -486,16 +486,32 @@ def get_cluster_summary(cluster_id):
     if subset.empty:
         return f"No bridges found in cluster {cluster_id}."
 
+    # 🔴 FIX: force numeric conversion ONLY here (no pipeline change)
+    cols_to_fix = [
+        "Bridge Health Index (Overall)",
+        "Bridge Health Index (Deck)",
+        "Bridge Health Index (Super)",
+        "Bridge Health Index (Sub)",
+        "YEAR_BUILT_027",
+        "ADT_029",
+        "MAX_SPAN_LEN_MT_048",
+        "deterioration_slope_per_year"
+    ]
+
+    for col in cols_to_fix:
+        if col in subset.columns:
+            subset[col] = pd.to_numeric(subset[col], errors="coerce")
+
     metrics = {
         "count": len(subset),
-        "avg_latest_overall_bhi": subset["Bridge Health Index (Overall)"].mean(),
+        "avg_latest_overall_bhi": subset["Bridge Health Index (Overall)"].mean() if "Bridge Health Index (Overall)" in subset.columns else np.nan,
         "avg_deck_bhi": subset["Bridge Health Index (Deck)"].mean() if "Bridge Health Index (Deck)" in subset.columns else np.nan,
         "avg_super_bhi": subset["Bridge Health Index (Super)"].mean() if "Bridge Health Index (Super)" in subset.columns else np.nan,
         "avg_sub_bhi": subset["Bridge Health Index (Sub)"].mean() if "Bridge Health Index (Sub)" in subset.columns else np.nan,
         "avg_year_built": subset["YEAR_BUILT_027"].mean() if "YEAR_BUILT_027" in subset.columns else np.nan,
         "avg_adt": subset["ADT_029"].mean() if "ADT_029" in subset.columns else np.nan,
         "avg_span_len": subset["MAX_SPAN_LEN_MT_048"].mean() if "MAX_SPAN_LEN_MT_048" in subset.columns else np.nan,
-        "avg_slope": subset["deterioration_slope_per_year"].mean(),
+        "avg_slope": subset["deterioration_slope_per_year"].mean() if "deterioration_slope_per_year" in subset.columns else np.nan,
     }
 
     return (
@@ -509,7 +525,6 @@ def get_cluster_summary(cluster_id):
         f"Average max span length: {metrics['avg_span_len']:.2f}\n"
         f"Average deterioration slope: {metrics['avg_slope']:.3f} BHI points/year"
     )
-
 
 def get_top_deteriorating_bridges(top_n=5):
     subset = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
