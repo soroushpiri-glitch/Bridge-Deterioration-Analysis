@@ -102,9 +102,9 @@ def load_data():
 
     return static_df, ts_df
 
+
 @st.cache_data
 def prepare_analysis(static_df, ts_df, n_clusters=6):
-    # Create pivot for time-series clustering
     pivot_df = ts_df.pivot_table(
         index="STRUCTURE_NUMBER_008",
         columns="Year of Data",
@@ -115,7 +115,6 @@ def prepare_analysis(static_df, ts_df, n_clusters=6):
     pivot_df = pivot_df.sort_index(axis=1)
     pivot_df = pivot_df.interpolate(axis=1, limit_direction="both").ffill(axis=1).bfill(axis=1)
 
-    # Standardize and cluster
     scaler = StandardScaler()
     scaled_data = scaler.fit_transform(pivot_df)
 
@@ -125,7 +124,6 @@ def prepare_analysis(static_df, ts_df, n_clusters=6):
     clustered = pivot_df.copy()
     clustered["Cluster"] = cluster_labels
 
-    # Bridge-level deterioration slope
     slopes = []
     for bridge_id, row in pivot_df.iterrows():
         y = row.values.astype(float)
@@ -146,7 +144,6 @@ def prepare_analysis(static_df, ts_df, n_clusters=6):
     cluster_df = clustered[["Cluster"]].reset_index()
     bridge_summary = cluster_df.merge(slope_df, on="STRUCTURE_NUMBER_008", how="left")
 
-    # Latest static record per bridge
     latest_static = (
         static_df.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"])
         .groupby("STRUCTURE_NUMBER_008", as_index=False)
@@ -170,6 +167,7 @@ def prepare_analysis(static_df, ts_df, n_clusters=6):
         "cluster_sizes": cluster_sizes,
         "kmeans": kmeans
     }
+
 
 static_df, ts_df = load_data()
 analysis = prepare_analysis(static_df, ts_df, n_clusters=6)
@@ -205,9 +203,11 @@ def find_best_bridge_match(bridge_id: str):
 
     return None
 
+
 def extract_years_from_prompt(user_query):
     years = re.findall(r"\b(19\d{2}|20\d{2})\b", user_query)
     return [int(y) for y in years]
+
 
 def extract_top_n(user_query, default=5):
     match = re.search(r"top\s+(\d+)", user_query.lower())
@@ -222,18 +222,50 @@ def overall_dataset_summary():
     total_bridges = pivot_df.shape[0]
     year_min = min(years_available)
     year_max = max(years_available)
-    cluster_text = ", ".join([f"Cluster {k}: {v}" for k, v in cluster_sizes.items()])
 
     slopes = bridge_summary["deterioration_slope_per_year"].dropna()
     avg_slope = slopes.mean() if not slopes.empty else np.nan
 
-    return (
-        f"The dataset contains {total_bridges:,} steel bridges with usable Bridge Health Index time-series data "
-        f"from {year_min} to {year_max}. "
-        f"The bridges were grouped into 6 clusters using KMeans on Bridge Health Index (Overall) trajectories. "
-        f"Cluster sizes are: {cluster_text}. "
-        f"The average bridge-level deterioration slope is {avg_slope:.3f} BHI points per year."
+    cluster_df = (
+        bridge_summary["Cluster"]
+        .value_counts()
+        .sort_index()
+        .reset_index()
     )
+    cluster_df.columns = ["Cluster", "Number of Bridges"]
+
+    summary_df = pd.DataFrame({
+        "Metric": [
+            "Total Bridges",
+            "Start Year",
+            "End Year",
+            "Number of Clusters",
+            "Average Deterioration Slope"
+        ],
+        "Value": [
+            total_bridges,
+            year_min,
+            year_max,
+            6,
+            round(avg_slope, 4)
+        ]
+    })
+
+    summary_text = (
+        f"Here is the overall summary of the bridge deterioration dataset:\n\n"
+        f"Total bridges: {total_bridges:,}\n"
+        f"Data span: {year_min} to {year_max}\n"
+        f"Clusters: 6 clusters using KMeans on BHI trajectories\n"
+        f"Average deterioration slope: {avg_slope:.4f} BHI points per year\n\n"
+        f"The tables below show the dataset summary and cluster distribution."
+    )
+
+    return {
+        "text": summary_text,
+        "summary_df": summary_df,
+        "cluster_df": cluster_df
+    }
+
 
 def get_bridge_profile(bridge_id):
     matched = find_best_bridge_match(bridge_id)
@@ -273,6 +305,7 @@ def get_bridge_profile(bridge_id):
 
     return "Bridge profile:\n" + "\n".join(text)
 
+
 def get_bridge_trend(bridge_id):
     matched = find_best_bridge_match(bridge_id)
     if matched is None:
@@ -295,6 +328,7 @@ def get_bridge_trend(bridge_id):
             lines.append(f"\nEstimated slope: {slope:.3f} BHI points/year ({direction}).")
 
     return "\n".join(lines)
+
 
 def compare_two_bridges(bridge_id_1, bridge_id_2):
     matched1 = find_best_bridge_match(bridge_id_1)
@@ -322,6 +356,7 @@ def compare_two_bridges(bridge_id_1, bridge_id_2):
         f"{row2['Bridge Health Index (Overall)']:.2f} and deterioration slope "
         f"{row2['deterioration_slope_per_year']:.3f} per year."
     )
+
 
 def get_cluster_summary(cluster_id):
     try:
@@ -357,6 +392,7 @@ def get_cluster_summary(cluster_id):
         f"Average deterioration slope: {metrics['avg_slope']:.3f} BHI points/year"
     )
 
+
 def get_top_deteriorating_bridges(top_n=5):
     subset = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
     subset = subset.sort_values("deterioration_slope_per_year", ascending=True).head(top_n)
@@ -368,6 +404,7 @@ def get_top_deteriorating_bridges(top_n=5):
             f"latest overall BHI {row['Bridge Health Index (Overall)']:.2f}, cluster {int(row['Cluster'])}"
         )
     return "\n".join(lines)
+
 
 def get_top_best_bridges(year, top_n=5):
     year = int(year)
@@ -383,6 +420,7 @@ def get_top_best_bridges(year, top_n=5):
             f"- Bridge {row['STRUCTURE_NUMBER_008']}: {row['Bridge Health Index (Overall)']:.2f}"
         )
     return "\n".join(lines)
+
 
 def get_top_worst_bridges(year, top_n=5):
     year = int(year)
@@ -422,6 +460,7 @@ def make_bridge_trend_figure(bridge_id):
     fig.tight_layout()
     return fig
 
+
 def make_compare_bridges_figure(bridge_id_1, bridge_id_2):
     matched1 = find_best_bridge_match(bridge_id_1)
     matched2 = find_best_bridge_match(bridge_id_2)
@@ -446,6 +485,7 @@ def make_compare_bridges_figure(bridge_id_1, bridge_id_2):
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
     return fig
+
 
 def make_cluster_median_figure(cluster_id):
     try:
@@ -478,7 +518,7 @@ def make_cluster_median_figure(cluster_id):
 # ---------------------------
 # Bedrock prompt + tools
 # ---------------------------
-SYSTEM_PROMPT = f"""
+SYSTEM_PROMPT = """
 You are a bridge deterioration analysis assistant.
 
 You answer questions about steel bridge Bridge Health Index (BHI) time-series data,
@@ -499,7 +539,9 @@ Rules:
 - Do not invent numeric values.
 - Keep answers concise, clear, and grounded in the data.
 - If a user asks for a plot, chart, trend, or visualize request, use the matching tool.
+- When the overall dataset summary is requested, keep the text short because tables are shown separately.
 """
+
 
 def get_tool_config():
     return {
@@ -631,7 +673,7 @@ def get_tool_config():
 # ---------------------------
 def execute_tool(tool_name, tool_input):
     if tool_name == "overall_summary":
-        return {"text": overall_dataset_summary()}
+        return overall_dataset_summary()
 
     if tool_name == "bridge_profile":
         bridge_id = tool_input["bridge_id"]
@@ -689,6 +731,7 @@ def extract_text_from_content_blocks(content_blocks):
             parts.append(block["text"])
     return "\n".join(parts).strip()
 
+
 def ask_bedrock_with_tools(user_prompt):
     messages = [
         {
@@ -700,6 +743,8 @@ def ask_bedrock_with_tools(user_prompt):
     pending_chart = None
     loops = 0
     max_loops = 6
+    pending_summary_df = None
+    pending_cluster_df = None
 
     try:
         response = bedrock.converse(
@@ -709,9 +754,9 @@ def ask_bedrock_with_tools(user_prompt):
             toolConfig=get_tool_config()
         )
     except (BotoCoreError, ClientError) as e:
-        return {"text": f"Bedrock request failed: {e}", "chart": None}
+        return {"text": f"Bedrock request failed: {e}", "chart": None, "summary_df": None, "cluster_df": None}
     except Exception as e:
-        return {"text": f"Unexpected Bedrock error: {e}", "chart": None}
+        return {"text": f"Unexpected Bedrock error: {e}", "chart": None, "summary_df": None, "cluster_df": None}
 
     while loops < max_loops:
         loops += 1
@@ -722,9 +767,14 @@ def ask_bedrock_with_tools(user_prompt):
 
         if stop_reason == "end_turn":
             final_text = extract_text_from_content_blocks(output_message["content"])
-            if not final_text:
+            if not final_text and pending_summary_df is None and pending_cluster_df is None:
                 final_text = "I could not generate a final answer."
-            return {"text": final_text, "chart": pending_chart}
+            return {
+                "text": final_text,
+                "chart": pending_chart,
+                "summary_df": pending_summary_df,
+                "cluster_df": pending_cluster_df
+            }
 
         if stop_reason == "tool_use":
             tool_result_content = []
@@ -739,6 +789,12 @@ def ask_bedrock_with_tools(user_prompt):
                 tool_use_id = tool_use["toolUseId"]
 
                 result = execute_tool(tool_name, tool_input)
+
+                if "summary_df" in result:
+                    pending_summary_df = result["summary_df"]
+
+                if "cluster_df" in result:
+                    pending_cluster_df = result["cluster_df"]
 
                 if result.get("show_trend_chart"):
                     pending_chart = {
@@ -759,17 +815,26 @@ def ask_bedrock_with_tools(user_prompt):
                         "cluster_id": result["cluster_id"]
                     }
 
+                json_safe_result = {}
+                for key, value in result.items():
+                    if isinstance(value, pd.DataFrame):
+                        json_safe_result[key] = value.to_dict(orient="records")
+                    else:
+                        json_safe_result[key] = value
+
                 tool_result_content.append({
                     "toolResult": {
                         "toolUseId": tool_use_id,
-                        "content": [{"json": result}]
+                        "content": [{"json": json_safe_result}]
                     }
                 })
 
             if not tool_result_content:
                 return {
                     "text": "The model requested tool use, but no valid tool call was returned.",
-                    "chart": None
+                    "chart": None,
+                    "summary_df": None,
+                    "cluster_df": None
                 }
 
             messages.append({
@@ -785,20 +850,44 @@ def ask_bedrock_with_tools(user_prompt):
                     toolConfig=get_tool_config()
                 )
             except (BotoCoreError, ClientError) as e:
-                return {"text": f"Bedrock follow-up request failed: {e}", "chart": None}
+                return {
+                    "text": f"Bedrock follow-up request failed: {e}",
+                    "chart": None,
+                    "summary_df": pending_summary_df,
+                    "cluster_df": pending_cluster_df
+                }
             except Exception as e:
-                return {"text": f"Unexpected Bedrock follow-up error: {e}", "chart": None}
+                return {
+                    "text": f"Unexpected Bedrock follow-up error: {e}",
+                    "chart": None,
+                    "summary_df": pending_summary_df,
+                    "cluster_df": pending_cluster_df
+                }
 
             continue
 
-        return {"text": "I could not complete the request.", "chart": None}
+        return {
+            "text": "I could not complete the request.",
+            "chart": None,
+            "summary_df": pending_summary_df,
+            "cluster_df": pending_cluster_df
+        }
 
-    return {"text": "The Bedrock tool loop reached its limit.", "chart": None}
+    return {
+        "text": "The Bedrock tool loop reached its limit.",
+        "chart": None,
+        "summary_df": pending_summary_df,
+        "cluster_df": pending_cluster_df
+    }
+
 
 def answer_question(question):
     result = ask_bedrock_with_tools(question)
     fig = None
     chart = result.get("chart")
+
+    summary_df = result.get("summary_df")
+    cluster_df = result.get("cluster_df")
 
     if chart:
         if chart["type"] == "trend":
@@ -808,7 +897,12 @@ def answer_question(question):
         elif chart["type"] == "cluster":
             fig = make_cluster_median_figure(chart["cluster_id"])
 
-    return {"text": result["text"], "figure": fig}
+    return {
+        "text": result.get("text"),
+        "figure": fig,
+        "summary_df": summary_df,
+        "cluster_df": cluster_df
+    }
 
 # ---------------------------
 # Sidebar
@@ -849,9 +943,19 @@ if "messages" not in st.session_state:
         }
     ]
 
-for message in st.session_state.messages:
+for i, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
-        st.write(message["content"])
+        if message.get("content"):
+            st.write(message["content"])
+
+        if "summary_df" in message and message["summary_df"] is not None:
+            st.subheader("Dataset Summary")
+            st.dataframe(pd.DataFrame(message["summary_df"]), use_container_width=True)
+
+        if "cluster_df" in message and message["cluster_df"] is not None:
+            st.subheader("Cluster Distribution")
+            st.dataframe(pd.DataFrame(message["cluster_df"]), use_container_width=True)
+
         if "figure_key" in message and message["figure_key"] in st.session_state:
             st.pyplot(st.session_state[message["figure_key"]])
 
@@ -870,11 +974,27 @@ if user_prompt:
 
     assistant_message = {
         "role": "assistant",
-        "content": result["text"]
+        "content": result.get("text")
     }
 
+    if result.get("summary_df") is not None:
+        assistant_message["summary_df"] = result["summary_df"].to_dict(orient="records")
+
+    if result.get("cluster_df") is not None:
+        assistant_message["cluster_df"] = result["cluster_df"].to_dict(orient="records")
+
     with st.chat_message("assistant"):
-        st.write(result["text"])
+        if result.get("text"):
+            st.write(result["text"])
+
+        if result.get("summary_df") is not None:
+            st.subheader("Dataset Summary")
+            st.dataframe(result["summary_df"], use_container_width=True)
+
+        if result.get("cluster_df") is not None:
+            st.subheader("Cluster Distribution")
+            st.dataframe(result["cluster_df"], use_container_width=True)
+
         if result.get("figure") is not None:
             figure_key = f"fig_{len(st.session_state.messages)}"
             st.session_state[figure_key] = result["figure"]
