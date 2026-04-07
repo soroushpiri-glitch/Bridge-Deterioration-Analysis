@@ -463,7 +463,11 @@ def compare_two_bridges(bridge_id_1, bridge_id_2):
         f"{row2['deterioration_slope_per_year']:.3f} per year."
     )
 
-
+def clean_year_built(series):
+    s = pd.to_numeric(series, errors="coerce")
+    s[(s < 1800) | (s > 2100)] = np.nan
+    return s
+    
 def get_cluster_summary(cluster_id):
     try:
         cluster_id = int(cluster_id)
@@ -486,8 +490,11 @@ def get_cluster_summary(cluster_id):
     ]
 
     for col in cols_to_fix:
-        if col in subset.columns:
-            subset[col] = pd.to_numeric(subset[col], errors="coerce")
+    if col in subset.columns:
+        subset[col] = pd.to_numeric(subset[col], errors="coerce")
+
+    if "YEAR_BUILT_027" in subset.columns:
+        subset["YEAR_BUILT_027"] = clean_year_built(subset["YEAR_BUILT_027"])
 
     metrics = {
         "count": len(subset),
@@ -541,10 +548,15 @@ def compare_two_clusters(cluster_id_1, cluster_id_2):
     ]
 
     for col in cols_to_fix:
-        if col in subset1.columns:
-            subset1[col] = pd.to_numeric(subset1[col], errors="coerce")
-        if col in subset2.columns:
-            subset2[col] = pd.to_numeric(subset2[col], errors="coerce")
+    if col in subset1.columns:
+        subset1[col] = pd.to_numeric(subset1[col], errors="coerce")
+    if col in subset2.columns:
+        subset2[col] = pd.to_numeric(subset2[col], errors="coerce")
+
+    if "YEAR_BUILT_027" in subset1.columns:
+        subset1["YEAR_BUILT_027"] = clean_year_built(subset1["YEAR_BUILT_027"])
+    if "YEAR_BUILT_027" in subset2.columns:
+        subset2["YEAR_BUILT_027"] = clean_year_built(subset2["YEAR_BUILT_027"])
 
     metrics1 = {
         "count": len(subset1),
@@ -711,7 +723,7 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
     pc1_df = pc1_sorted.reset_index()
     pc1_df.columns = ["Feature", "PC1_Loading"]
     top_positive = pc1_sorted.head(top_n)
-    top_negative = pc1_sorted.tail(top_n)
+    top_negative = pc1_sorted.sort_values(ascending=True).head(top_n)
 
     explained_var = float(pca.explained_variance_ratio_[0]) if len(pca.explained_variance_ratio_) > 0 else np.nan
 
@@ -1199,7 +1211,69 @@ Important PCA rule:
 - Report PCA loadings as feature contributions to PC1.
 - Do not describe PCA loadings as causal unless the data explicitly supports causality.
 """
+def extract_cluster_ids(text):
+    matches = re.findall(r"cluster\s+(\d+)", text.lower())
+    return [int(x) for x in matches]
 
+def route_question(question: str):
+    q = question.lower().strip()
+    cluster_ids = extract_cluster_ids(q)
+
+    # Questions about what characterizes one cluster -> PCA tool
+    if (
+        len(cluster_ids) == 1 and
+        any(phrase in q for phrase in [
+            "what features characterize",
+            "what characterizes",
+            "main factors",
+            "important variables",
+            "key variables",
+            "key drivers",
+            "feature drivers"
+        ])
+    ):
+        return {
+            "mode": "direct_tool",
+            "tool_name": "cluster_pca_drivers",
+            "tool_input": {"cluster_id": cluster_ids[0], "top_n": 8}
+        }
+
+    # Ambiguous "why is cluster X different?"
+    if (
+        len(cluster_ids) == 1 and
+        any(phrase in q for phrase in [
+            "why is cluster",
+            "how is cluster",
+            "why cluster"
+        ]) and
+        "compare" not in q and
+        "vs" not in q and
+        "versus" not in q
+    ):
+        return {
+            "mode": "direct_text",
+            "text": (
+                f"Your question is ambiguous. Cluster {cluster_ids[0]} is different compared to which cluster? "
+                f"You can ask:\n"
+                f"- Compare cluster {cluster_ids[0]} and cluster 1\n"
+                f"- Summarize cluster {cluster_ids[0]}\n"
+                f"- What features characterize cluster {cluster_ids[0]}?"
+            )
+        }
+
+    # Explicit compare question with two clusters
+    if len(cluster_ids) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
+        return {
+            "mode": "direct_tool",
+            "tool_name": "compare_clusters",
+            "tool_input": {
+                "cluster_id_1": cluster_ids[0],
+                "cluster_id_2": cluster_ids[1]
+            }
+        }
+
+    return {"mode": "bedrock"}
+    
 def ask_bedrock_with_tools(user_prompt):
     messages = [
         {
@@ -1211,6 +1285,7 @@ def ask_bedrock_with_tools(user_prompt):
     pending_chart = None
     pending_summary_df = None
     pending_cluster_df = None
+    pending_pc1_table = None
     loops = 0
     max_loops = 6
 
@@ -1252,6 +1327,7 @@ def ask_bedrock_with_tools(user_prompt):
                 "chart": pending_chart,
                 "summary_df": pending_summary_df,
                 "cluster_df": pending_cluster_df
+                "pc1_table": pending_pc1_table
             }
 
         if stop_reason == "tool_use":
@@ -1268,6 +1344,9 @@ def ask_bedrock_with_tools(user_prompt):
 
                 result = execute_tool(tool_name, tool_input)
 
+                if "pc1_table" in result:
+                    pending_pc1_table = result["pc1_table"]
+    
                 if "summary_df" in result:
                     pending_summary_df = result["summary_df"]
 
@@ -1367,12 +1446,41 @@ def ask_bedrock_with_tools(user_prompt):
 
 
 def answer_question(question):
+    routed = route_question(question)
+
+    if routed["mode"] == "direct_text":
+        return {
+            "text": routed["text"],
+            "figure": None,
+            "summary_df": None,
+            "cluster_df": None,
+            "pc1_table": None
+        }
+
+    if routed["mode"] == "direct_tool":
+        result = execute_tool(routed["tool_name"], routed["tool_input"])
+
+        fig = None
+        if result.get("show_cluster_chart"):
+            fig = make_cluster_median_figure(result["cluster_id"])
+        elif result.get("show_compare_clusters_chart"):
+            fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
+
+        return {
+            "text": result.get("text"),
+            "figure": fig,
+            "summary_df": result.get("summary_df"),
+            "cluster_df": result.get("cluster_df"),
+            "pc1_table": result.get("pc1_table")
+        }
+
     result = ask_bedrock_with_tools(question)
     fig = None
     chart = result.get("chart")
 
     summary_df = result.get("summary_df")
     cluster_df = result.get("cluster_df")
+    pc1_table = result.get("pc1_table")
 
     if chart:
         if chart["type"] == "trend":
@@ -1388,9 +1496,9 @@ def answer_question(question):
         "text": result.get("text"),
         "figure": fig,
         "summary_df": summary_df,
-        "cluster_df": cluster_df
+        "cluster_df": cluster_df,
+        "pc1_table": pc1_table
     }
-
 # ---------------------------
 # Sidebar
 # ---------------------------
@@ -1438,7 +1546,9 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         if message.get("content"):
             st.write(message["content"])
-
+        if "pc1_table" in message and message["pc1_table"] is not None:
+            st.subheader("PC1 Loadings")
+            st.dataframe(pd.DataFrame(message["pc1_table"]), use_container_width=True)
         if "summary_df" in message and message["summary_df"] is not None:
             st.subheader("Dataset Summary")
             st.dataframe(pd.DataFrame(message["summary_df"]), use_container_width=True)
@@ -1468,6 +1578,9 @@ if user_prompt:
         "content": result.get("text")
     }
 
+    if result.get("pc1_table") is not None:
+    assistant_message["pc1_table"] = result["pc1_table"].to_dict(orient="records")
+
     if result.get("summary_df") is not None:
         assistant_message["summary_df"] = result["summary_df"].to_dict(orient="records")
 
@@ -1491,5 +1604,9 @@ if user_prompt:
             st.session_state[figure_key] = result["figure"]
             assistant_message["figure_key"] = figure_key
             st.pyplot(result["figure"])
+
+        if result.get("pc1_table") is not None:
+        st.subheader("PC1 Loadings")
+        st.dataframe(result["pc1_table"], use_container_width=True)
 
     st.session_state.messages.append(assistant_message)
