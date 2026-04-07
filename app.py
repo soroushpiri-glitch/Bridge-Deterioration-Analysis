@@ -1,4 +1,5 @@
 import re
+import os
 import boto3
 import numpy as np
 import pandas as pd
@@ -13,8 +14,8 @@ from scipy.stats import linregress
 # Config
 # ---------------------------
 N_CLUSTERS = 6
-TS_FILE = "Steel_Bridges_20_and_Over_20_TimeSeries_Data.csv"
 STATIC_FILE = "STEEL_Bridges.csv"
+TS_FILE = "Steel_Bridges_20_and_Over_20_TimeSeries_Data_revised.xls"
 
 # ---------------------------
 # AWS config
@@ -51,12 +52,33 @@ st.title("Bridge Deterioration Analysis")
 st.caption("Amazon Bedrock + Streamlit + Bridge Health Index time-series clustering")
 
 # ---------------------------
+# File reader
+# ---------------------------
+def read_table_file(file_path: str) -> pd.DataFrame:
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == ".csv":
+        return pd.read_csv(file_path, low_memory=False)
+    if ext in [".xlsx", ".xls"]:
+        return pd.read_excel(file_path)
+
+    raise ValueError(f"Unsupported file type: {ext}")
+
+# ---------------------------
 # Load data
 # ---------------------------
 @st.cache_data
 def load_data():
-    static_df = pd.read_csv(STATIC_FILE, low_memory=False)
-    ts_df = pd.read_csv(TS_FILE, low_memory=False)
+    if not os.path.exists(STATIC_FILE):
+        st.error(f"Missing required file: {STATIC_FILE}")
+        st.stop()
+
+    if not os.path.exists(TS_FILE):
+        st.error(f"Missing required file: {TS_FILE}")
+        st.stop()
+
+    static_df = read_table_file(STATIC_FILE)
+    ts_df = read_table_file(TS_FILE)
 
     static_df.columns = static_df.columns.str.strip()
     ts_df.columns = ts_df.columns.str.strip()
@@ -107,12 +129,14 @@ def load_data():
 
     return static_df, ts_df
 
-
+# ---------------------------
+# Prepare analysis
+# ---------------------------
 @st.cache_data
 def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
-    # Match original notebook logic more closely:
-    # pivot BHI overall by bridge and year, interpolate/fill missing values,
-    # then run KMeans directly on the raw filled pivot table (no scaling)
+    # Match original notebook logic:
+    # use raw pivoted BHI overall values, interpolate/fill missing values,
+    # then run KMeans directly without scaling
     df = ts_df[[
         "STRUCTURE_NUMBER_008",
         "Year of Data",
@@ -178,7 +202,6 @@ def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
         "cluster_sizes": cluster_sizes,
         "kmeans": kmeans
     }
-
 
 static_df, ts_df = load_data()
 analysis = prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS)
@@ -384,11 +407,11 @@ def get_cluster_summary(cluster_id):
         "count": len(subset),
         "avg_latest_overall_bhi": subset["Bridge Health Index (Overall)"].mean(),
         "avg_deck_bhi": subset["Bridge Health Index (Deck)"].mean() if "Bridge Health Index (Deck)" in subset.columns else np.nan,
-        "avg_super_bhi": subset["Bridge Health Index (Super)"].mean(),
-        "avg_sub_bhi": subset["Bridge Health Index (Sub)"].mean(),
-        "avg_year_built": subset["YEAR_BUILT_027"].mean(),
-        "avg_adt": subset["ADT_029"].mean(),
-        "avg_span_len": subset["MAX_SPAN_LEN_MT_048"].mean(),
+        "avg_super_bhi": subset["Bridge Health Index (Super)"].mean() if "Bridge Health Index (Super)" in subset.columns else np.nan,
+        "avg_sub_bhi": subset["Bridge Health Index (Sub)"].mean() if "Bridge Health Index (Sub)" in subset.columns else np.nan,
+        "avg_year_built": subset["YEAR_BUILT_027"].mean() if "YEAR_BUILT_027" in subset.columns else np.nan,
+        "avg_adt": subset["ADT_029"].mean() if "ADT_029" in subset.columns else np.nan,
+        "avg_span_len": subset["MAX_SPAN_LEN_MT_048"].mean() if "MAX_SPAN_LEN_MT_048" in subset.columns else np.nan,
         "avg_slope": subset["deterioration_slope_per_year"].mean(),
     }
 
@@ -945,6 +968,7 @@ with st.sidebar:
     st.write(f"Time-series records: {len(ts_df):,}")
     st.write(f"Usable bridges: {pivot_df.shape[0]:,}")
     st.write(f"Years: {min(years_available)}–{max(years_available)}")
+    st.write(f"Time-series file used: {TS_FILE}")
     st.write(f"AWS Region: {AWS_REGION}")
     st.caption("Use a bridge ID from STRUCTURE_NUMBER_008")
     st.write("Example questions:")
