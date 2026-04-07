@@ -1,5 +1,4 @@
 import re
-import json
 import boto3
 import numpy as np
 import pandas as pd
@@ -8,8 +7,14 @@ import streamlit as st
 
 from botocore.exceptions import BotoCoreError, ClientError
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
 from scipy.stats import linregress
+
+# ---------------------------
+# Config
+# ---------------------------
+N_CLUSTERS = 6
+TS_FILE = "Steel_Bridges_20_and_Over_20_TimeSeries_Data_revised.csv"
+STATIC_FILE = "STEEL_Bridges.csv"
 
 # ---------------------------
 # AWS config
@@ -50,8 +55,8 @@ st.caption("Amazon Bedrock + Streamlit + Bridge Health Index time-series cluster
 # ---------------------------
 @st.cache_data
 def load_data():
-    static_df = pd.read_csv("STEEL_Bridges.csv", low_memory=False)
-    ts_df = pd.read_csv("Steel_Bridges_20_and_Over_20_TimeSeries_Data.csv", low_memory=False)
+    static_df = pd.read_csv(STATIC_FILE, low_memory=False)
+    ts_df = pd.read_csv(TS_FILE, low_memory=False)
 
     static_df.columns = static_df.columns.str.strip()
     ts_df.columns = ts_df.columns.str.strip()
@@ -97,29 +102,36 @@ def load_data():
     static_df = static_df.dropna(subset=["STRUCTURE_NUMBER_008", "Year of Data"])
     ts_df = ts_df.dropna(subset=["STRUCTURE_NUMBER_008", "Year of Data", "Bridge Health Index (Overall)"])
 
-    ts_df["Year of Data"] = ts_df["Year of Data"].astype(int)
     static_df["Year of Data"] = static_df["Year of Data"].astype(int)
+    ts_df["Year of Data"] = ts_df["Year of Data"].astype(int)
 
     return static_df, ts_df
 
 
 @st.cache_data
-def prepare_analysis(static_df, ts_df, n_clusters=6):
-    pivot_df = ts_df.pivot_table(
+def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
+    # Match original notebook logic
+    df = ts_df[[
+        "STRUCTURE_NUMBER_008",
+        "Year of Data",
+        "Bridge Health Index (Overall)"
+    ]].dropna()
+
+    pivot_df = df.pivot(
         index="STRUCTURE_NUMBER_008",
         columns="Year of Data",
-        values="Bridge Health Index (Overall)",
-        aggfunc="mean"
+        values="Bridge Health Index (Overall)"
     )
 
     pivot_df = pivot_df.sort_index(axis=1)
     pivot_df = pivot_df.interpolate(axis=1, limit_direction="both").ffill(axis=1).bfill(axis=1)
 
-    scaler = StandardScaler()
-    scaled_data = scaler.fit_transform(pivot_df)
+    # IMPORTANT: no scaling here, to match original notebook
+    filtered_df = pivot_df.copy()
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    cluster_labels = kmeans.fit_predict(scaled_data)
+    # Match notebook KMeans setup
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    cluster_labels = kmeans.fit_predict(filtered_df)
 
     clustered = pivot_df.copy()
     clustered["Cluster"] = cluster_labels
@@ -170,7 +182,7 @@ def prepare_analysis(static_df, ts_df, n_clusters=6):
 
 
 static_df, ts_df = load_data()
-analysis = prepare_analysis(static_df, ts_df, n_clusters=6)
+analysis = prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS)
 
 pivot_df = analysis["pivot_df"]
 clustered_df = analysis["clustered_df"]
@@ -202,11 +214,6 @@ def find_best_bridge_match(bridge_id: str):
         return reverse_contains[0]
 
     return None
-
-
-def extract_years_from_prompt(user_query):
-    years = re.findall(r"\b(19\d{2}|20\d{2})\b", user_query)
-    return [int(y) for y in years]
 
 
 def extract_top_n(user_query, default=5):
@@ -246,16 +253,22 @@ def overall_dataset_summary():
             total_bridges,
             year_min,
             year_max,
-            6,
+            N_CLUSTERS,
             round(avg_slope, 4)
         ]
     })
+
+    cluster_lines = [
+        f"Cluster {int(row['Cluster'])}: {int(row['Number of Bridges'])}"
+        for _, row in cluster_df.iterrows()
+    ]
 
     summary_text = (
         f"Here is the overall summary of the bridge deterioration dataset:\n\n"
         f"Total bridges: {total_bridges:,}\n"
         f"Data span: {year_min} to {year_max}\n"
-        f"Clusters: 6 clusters using KMeans on BHI trajectories\n"
+        f"Clusters: {N_CLUSTERS} clusters using KMeans on BHI trajectories\n"
+        f"Cluster sizes:\n" + "\n".join(cluster_lines) + "\n"
         f"Average deterioration slope: {avg_slope:.4f} BHI points per year\n\n"
         f"The tables below show the dataset summary and cluster distribution."
     )
@@ -518,11 +531,16 @@ def make_cluster_median_figure(cluster_id):
 # ---------------------------
 # Bedrock prompt + tools
 # ---------------------------
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = f"""
 You are a bridge deterioration analysis assistant.
 
 You answer questions about steel bridge Bridge Health Index (BHI) time-series data,
 bridge-level deterioration trends, and KMeans clustering results.
+
+Important:
+- The clustering was performed using the raw interpolated pivot table of
+  'Bridge Health Index (Overall)' by year, without standardization.
+- The number of clusters is {N_CLUSTERS}.
 
 Available analysis concepts:
 - bridge profile
@@ -741,10 +759,10 @@ def ask_bedrock_with_tools(user_prompt):
     ]
 
     pending_chart = None
-    loops = 0
-    max_loops = 6
     pending_summary_df = None
     pending_cluster_df = None
+    loops = 0
+    max_loops = 6
 
     try:
         response = bedrock.converse(
@@ -754,9 +772,19 @@ def ask_bedrock_with_tools(user_prompt):
             toolConfig=get_tool_config()
         )
     except (BotoCoreError, ClientError) as e:
-        return {"text": f"Bedrock request failed: {e}", "chart": None, "summary_df": None, "cluster_df": None}
+        return {
+            "text": f"Bedrock request failed: {e}",
+            "chart": None,
+            "summary_df": None,
+            "cluster_df": None
+        }
     except Exception as e:
-        return {"text": f"Unexpected Bedrock error: {e}", "chart": None, "summary_df": None, "cluster_df": None}
+        return {
+            "text": f"Unexpected Bedrock error: {e}",
+            "chart": None,
+            "summary_df": None,
+            "cluster_df": None
+        }
 
     while loops < max_loops:
         loops += 1
@@ -943,7 +971,7 @@ if "messages" not in st.session_state:
         }
     ]
 
-for i, message in enumerate(st.session_state.messages):
+for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         if message.get("content"):
             st.write(message["content"])
