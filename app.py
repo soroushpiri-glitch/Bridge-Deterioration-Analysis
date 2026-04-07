@@ -129,7 +129,6 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
     data = static_df.copy()
     data = data.dropna()
 
-    # Select relevant columns
     df_full = data[[
         "Year of Data",
         "STRUCTURE_NUMBER_008",
@@ -139,25 +138,19 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
         "Bridge Health Index (Sub)"
     ]].copy()
 
-    # Count appearances of each bridge
     counts = df_full["STRUCTURE_NUMBER_008"].value_counts()
-
-    # Keep only bridges with at least 20 records
     structure_ids_20 = counts[(counts >= 20)].index
     df_filtered = df_full[df_full["STRUCTURE_NUMBER_008"].isin(structure_ids_20)].copy()
 
-    # Keep only needed columns and drop missing values
     df_check = df_filtered[[
         "STRUCTURE_NUMBER_008",
         "Year of Data",
         "Bridge Health Index (Overall)"
     ]].dropna().copy()
 
-    # Sort for consistent processing
     df_check = df_check.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"])
     df_check["Year of Data"] = df_check["Year of Data"].astype(int)
 
-    # Find bridges with constant health index for 20 consecutive years
     unchanged_bridges = []
 
     for bridge_id, group in df_check.groupby("STRUCTURE_NUMBER_008"):
@@ -172,19 +165,15 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
                 unchanged_bridges.append(bridge_id)
                 break
 
-    # Keep only bridges found as unchanged
     result_df = df_check[df_check["STRUCTURE_NUMBER_008"].isin(unchanged_bridges)].copy()
 
-    # Remove unchanged bridges from original filtered dataframe
     unique_structures = result_df["STRUCTURE_NUMBER_008"].unique()
     df_filtered_cleaned = df_filtered[
         ~df_filtered["STRUCTURE_NUMBER_008"].isin(unique_structures)
     ].copy()
 
-    # this corresponds to your data_2
     ts_df = df_filtered_cleaned.copy()
 
-    # Build clustering dataframe
     df_cluster = ts_df[[
         "STRUCTURE_NUMBER_008",
         "Year of Data",
@@ -204,14 +193,12 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
 
     filtered_df = pivot_df.copy()
 
-    # exact clustering style from your original code
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
     cluster_labels = kmeans.fit_predict(filtered_df)
 
     clustered = pivot_df.copy()
     clustered["Cluster"] = cluster_labels
 
-    # slope calculation for app features
     slopes = []
     for bridge_id, row in pivot_df.iterrows():
         y = row.values.astype(float)
@@ -232,7 +219,6 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
     cluster_df = clustered[["Cluster"]].reset_index()
     bridge_summary = cluster_df.merge(slope_df, on="STRUCTURE_NUMBER_008", how="left")
 
-    # latest bridge info from raw file
     latest_static = (
         static_df.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"])
         .groupby("STRUCTURE_NUMBER_008", as_index=False)
@@ -486,7 +472,6 @@ def get_cluster_summary(cluster_id):
     if subset.empty:
         return f"No bridges found in cluster {cluster_id}."
 
-    # 🔴 FIX: force numeric conversion ONLY here (no pipeline change)
     cols_to_fix = [
         "Bridge Health Index (Overall)",
         "Bridge Health Index (Deck)",
@@ -525,6 +510,113 @@ def get_cluster_summary(cluster_id):
         f"Average max span length: {metrics['avg_span_len']:.2f}\n"
         f"Average deterioration slope: {metrics['avg_slope']:.3f} BHI points/year"
     )
+
+
+def compare_two_clusters(cluster_id_1, cluster_id_2):
+    try:
+        cluster_id_1 = int(cluster_id_1)
+        cluster_id_2 = int(cluster_id_2)
+    except Exception:
+        return "Invalid cluster ids."
+
+    subset1 = bridge_summary[bridge_summary["Cluster"] == cluster_id_1].copy()
+    subset2 = bridge_summary[bridge_summary["Cluster"] == cluster_id_2].copy()
+
+    if subset1.empty:
+        return f"No bridges found in cluster {cluster_id_1}."
+    if subset2.empty:
+        return f"No bridges found in cluster {cluster_id_2}."
+
+    cols_to_fix = [
+        "Bridge Health Index (Overall)",
+        "Bridge Health Index (Deck)",
+        "Bridge Health Index (Super)",
+        "Bridge Health Index (Sub)",
+        "YEAR_BUILT_027",
+        "ADT_029",
+        "MAX_SPAN_LEN_MT_048",
+        "deterioration_slope_per_year"
+    ]
+
+    for col in cols_to_fix:
+        if col in subset1.columns:
+            subset1[col] = pd.to_numeric(subset1[col], errors="coerce")
+        if col in subset2.columns:
+            subset2[col] = pd.to_numeric(subset2[col], errors="coerce")
+
+    metrics1 = {
+        "count": len(subset1),
+        "avg_latest_overall_bhi": subset1["Bridge Health Index (Overall)"].mean(),
+        "avg_deck_bhi": subset1["Bridge Health Index (Deck)"].mean() if "Bridge Health Index (Deck)" in subset1.columns else np.nan,
+        "avg_super_bhi": subset1["Bridge Health Index (Super)"].mean() if "Bridge Health Index (Super)" in subset1.columns else np.nan,
+        "avg_sub_bhi": subset1["Bridge Health Index (Sub)"].mean() if "Bridge Health Index (Sub)" in subset1.columns else np.nan,
+        "avg_year_built": subset1["YEAR_BUILT_027"].mean() if "YEAR_BUILT_027" in subset1.columns else np.nan,
+        "avg_adt": subset1["ADT_029"].mean() if "ADT_029" in subset1.columns else np.nan,
+        "avg_span_len": subset1["MAX_SPAN_LEN_MT_048"].mean() if "MAX_SPAN_LEN_MT_048" in subset1.columns else np.nan,
+        "avg_slope": subset1["deterioration_slope_per_year"].mean() if "deterioration_slope_per_year" in subset1.columns else np.nan,
+    }
+
+    metrics2 = {
+        "count": len(subset2),
+        "avg_latest_overall_bhi": subset2["Bridge Health Index (Overall)"].mean(),
+        "avg_deck_bhi": subset2["Bridge Health Index (Deck)"].mean() if "Bridge Health Index (Deck)" in subset2.columns else np.nan,
+        "avg_super_bhi": subset2["Bridge Health Index (Super)"].mean() if "Bridge Health Index (Super)" in subset2.columns else np.nan,
+        "avg_sub_bhi": subset2["Bridge Health Index (Sub)"].mean() if "Bridge Health Index (Sub)" in subset2.columns else np.nan,
+        "avg_year_built": subset2["YEAR_BUILT_027"].mean() if "YEAR_BUILT_027" in subset2.columns else np.nan,
+        "avg_adt": subset2["ADT_029"].mean() if "ADT_029" in subset2.columns else np.nan,
+        "avg_span_len": subset2["MAX_SPAN_LEN_MT_048"].mean() if "MAX_SPAN_LEN_MT_048" in subset2.columns else np.nan,
+        "avg_slope": subset2["deterioration_slope_per_year"].mean() if "deterioration_slope_per_year" in subset2.columns else np.nan,
+    }
+
+    interpretation = []
+
+    if metrics1["avg_latest_overall_bhi"] > metrics2["avg_latest_overall_bhi"]:
+        interpretation.append(f"Cluster {cluster_id_1} has the higher average latest overall BHI.")
+    else:
+        interpretation.append(f"Cluster {cluster_id_2} has the higher average latest overall BHI.")
+
+    if metrics1["avg_slope"] > metrics2["avg_slope"]:
+        interpretation.append(f"Cluster {cluster_id_1} shows the stronger positive average deterioration slope.")
+    else:
+        interpretation.append(f"Cluster {cluster_id_2} shows the stronger positive average deterioration slope.")
+
+    if metrics1["avg_adt"] > metrics2["avg_adt"]:
+        interpretation.append(f"Cluster {cluster_id_1} carries higher average daily traffic.")
+    else:
+        interpretation.append(f"Cluster {cluster_id_2} carries higher average daily traffic.")
+
+    if metrics1["avg_span_len"] > metrics2["avg_span_len"]:
+        interpretation.append(f"Cluster {cluster_id_1} has longer spans on average.")
+    else:
+        interpretation.append(f"Cluster {cluster_id_2} has longer spans on average.")
+
+    text = (
+        f"Here is a comparison between Cluster {cluster_id_1} and Cluster {cluster_id_2}:\n\n"
+        f"Cluster {cluster_id_1}:\n"
+        f"- Contains {metrics1['count']:,} bridges\n"
+        f"- Average latest overall BHI: {metrics1['avg_latest_overall_bhi']:.2f}\n"
+        f"- Average deck BHI: {metrics1['avg_deck_bhi']:.2f}\n"
+        f"- Average superstructure BHI: {metrics1['avg_super_bhi']:.2f}\n"
+        f"- Average substructure BHI: {metrics1['avg_sub_bhi']:.2f}\n"
+        f"- Average year built: {metrics1['avg_year_built']:.1f}\n"
+        f"- Average ADT: {metrics1['avg_adt']:.1f}\n"
+        f"- Average max span length: {metrics1['avg_span_len']:.2f}\n"
+        f"- Average deterioration slope: {metrics1['avg_slope']:.3f} BHI points/year\n\n"
+        f"Cluster {cluster_id_2}:\n"
+        f"- Contains {metrics2['count']:,} bridges\n"
+        f"- Average latest overall BHI: {metrics2['avg_latest_overall_bhi']:.2f}\n"
+        f"- Average deck BHI: {metrics2['avg_deck_bhi']:.2f}\n"
+        f"- Average superstructure BHI: {metrics2['avg_super_bhi']:.2f}\n"
+        f"- Average substructure BHI: {metrics2['avg_sub_bhi']:.2f}\n"
+        f"- Average year built: {metrics2['avg_year_built']:.1f}\n"
+        f"- Average ADT: {metrics2['avg_adt']:.1f}\n"
+        f"- Average max span length: {metrics2['avg_span_len']:.2f}\n"
+        f"- Average deterioration slope: {metrics2['avg_slope']:.3f} BHI points/year\n\n"
+        f"Interpretation:\n- " + "\n- ".join(interpretation)
+    )
+
+    return text
+
 
 def get_top_deteriorating_bridges(top_n=5):
     subset = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
@@ -648,6 +740,37 @@ def make_cluster_median_figure(cluster_id):
     fig.tight_layout()
     return fig
 
+
+def make_compare_clusters_figure(cluster_id_1, cluster_id_2):
+    try:
+        cluster_id_1 = int(cluster_id_1)
+        cluster_id_2 = int(cluster_id_2)
+    except Exception:
+        return None
+
+    subset1 = clustered_df[clustered_df["Cluster"] == cluster_id_1].drop(columns="Cluster")
+    subset2 = clustered_df[clustered_df["Cluster"] == cluster_id_2].drop(columns="Cluster")
+
+    if subset1.empty or subset2.empty:
+        return None
+
+    years = subset1.columns.tolist()
+    median_trend_1 = subset1.median(axis=0)
+    median_trend_2 = subset2.median(axis=0)
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(years, median_trend_1.values, marker="o", linewidth=2, label=f"Cluster {cluster_id_1}")
+    ax.plot(years, median_trend_2.values, marker="o", linewidth=2, label=f"Cluster {cluster_id_2}")
+    ax.set_title(f"Cluster {cluster_id_1} vs Cluster {cluster_id_2}", fontsize=12, pad=10)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Bridge Health Index (Overall)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    return fig
+
 # ---------------------------
 # Bedrock prompt + tools
 # ---------------------------
@@ -674,6 +797,7 @@ Available analysis concepts:
 - bridge trend over time
 - comparison between two bridges
 - cluster summary
+- comparison between two clusters
 - overall dataset summary
 - worst bridges in a specific year
 - best bridges in a specific year
@@ -766,6 +890,22 @@ def get_tool_config():
             },
             {
                 "toolSpec": {
+                    "name": "compare_clusters",
+                    "description": "Compare two clusters using average bridge characteristics and deterioration behavior.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "cluster_id_1": {"type": "integer"},
+                                "cluster_id_2": {"type": "integer"}
+                            },
+                            "required": ["cluster_id_1", "cluster_id_2"]
+                        }
+                    }
+                }
+            },
+            {
+                "toolSpec": {
                     "name": "top_deteriorating_bridges",
                     "description": "Return the fastest deteriorating bridges based on linear slope.",
                     "inputSchema": {
@@ -848,6 +988,16 @@ def execute_tool(tool_name, tool_input):
             "text": get_cluster_summary(cluster_id),
             "cluster_id": cluster_id,
             "show_cluster_chart": True
+        }
+
+    if tool_name == "compare_clusters":
+        cluster_id_1 = int(tool_input["cluster_id_1"])
+        cluster_id_2 = int(tool_input["cluster_id_2"])
+        return {
+            "text": compare_two_clusters(cluster_id_1, cluster_id_2),
+            "cluster_id_1": cluster_id_1,
+            "cluster_id_2": cluster_id_2,
+            "show_compare_clusters_chart": True
         }
 
     if tool_name == "top_deteriorating_bridges":
@@ -970,6 +1120,13 @@ def ask_bedrock_with_tools(user_prompt):
                         "cluster_id": result["cluster_id"]
                     }
 
+                if result.get("show_compare_clusters_chart"):
+                    pending_chart = {
+                        "type": "compare_clusters",
+                        "cluster_id_1": result["cluster_id_1"],
+                        "cluster_id_2": result["cluster_id_2"]
+                    }
+
                 json_safe_result = {}
                 for key, value in result.items():
                     if isinstance(value, pd.DataFrame):
@@ -1051,6 +1208,8 @@ def answer_question(question):
             fig = make_compare_bridges_figure(chart["bridge_id_1"], chart["bridge_id_2"])
         elif chart["type"] == "cluster":
             fig = make_cluster_median_figure(chart["cluster_id"])
+        elif chart["type"] == "compare_clusters":
+            fig = make_compare_clusters_figure(chart["cluster_id_1"], chart["cluster_id_2"])
 
     return {
         "text": result.get("text"),
@@ -1061,30 +1220,21 @@ def answer_question(question):
 
 # ---------------------------
 # Sidebar
-# pick meaningful examples instead of arbitrary IDs
-
+# ---------------------------
 sample_df = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
 
-# random example
 example_1 = sample_df.sample(1)["STRUCTURE_NUMBER_008"].iloc[0]
 
-# different cluster example
 example_2 = sample_df[
     sample_df["Cluster"] != sample_df[sample_df["STRUCTURE_NUMBER_008"] == example_1]["Cluster"].iloc[0]
 ].sample(1)["STRUCTURE_NUMBER_008"].iloc[0]
 
-# worst deterioration example
 example_3 = sample_df.sort_values("deterioration_slope_per_year").iloc[0]["STRUCTURE_NUMBER_008"]
 
 with st.sidebar:
     st.subheader("Dataset")
-    st.write(f"Raw rows after dropna(): {preprocessing_summary['raw_rows_after_dropna']:,}")
-    st.write(f"Processed time-series records: {len(ts_df):,}")
-    st.write(f"Usable bridges after preprocessing: {pivot_df.shape[0]:,}")
+    st.write("This dataset contains 1,378 bridges.")
     st.write(f"Years: {min(years_available)}–{max(years_available)}")
-    st.write(f"Source file used: {STATIC_FILE}")
-    st.write(f"AWS Region: {AWS_REGION}")
-    st.write(f"Bridges with 20+ records: {preprocessing_summary['bridges_with_20plus_records']:,}")
     st.write(f"Constant 20-year bridges removed: {preprocessing_summary['constant_20year_bridges_removed']:,}")
     st.caption("Use a bridge ID from STRUCTURE_NUMBER_008")
     st.write("Example questions:")
@@ -1093,6 +1243,7 @@ with st.sidebar:
     - Show trend for bridge {example_1}
     - Compare bridge {example_1} and {example_2}
     - Summarize cluster 2
+    - Compare cluster 2 and cluster 3
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
     - Show the 5 best bridges in 2020
