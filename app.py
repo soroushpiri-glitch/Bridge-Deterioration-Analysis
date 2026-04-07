@@ -15,7 +15,7 @@ from scipy.stats import linregress
 # ---------------------------
 N_CLUSTERS = 6
 STATIC_FILE = "STEEL_Bridges.csv"
-TS_FILE = "Steel_Bridges_20_and_Over_20_TimeSeries_Data_revised.xls"
+TS_FILE = "Steel_Bridges_20_and_Over_20_TimeSeries_Data_revised.csv"
 
 # ---------------------------
 # AWS config
@@ -55,13 +55,6 @@ st.caption("Amazon Bedrock + Streamlit + Bridge Health Index time-series cluster
 # File reader
 # ---------------------------
 def read_table_file(file_path: str) -> pd.DataFrame:
-    """
-    Robust table reader that handles:
-    - CSV
-    - XLSX via openpyxl
-    - XLS via xlrd
-    - mislabeled .xls files that are actually .xlsx or text/CSV
-    """
     ext = os.path.splitext(file_path)[1].lower()
 
     if not os.path.exists(file_path):
@@ -74,15 +67,12 @@ def read_table_file(file_path: str) -> pd.DataFrame:
         return pd.read_excel(file_path, engine="openpyxl")
 
     if ext == ".xls":
-        # First try true old-style XLS
         try:
             return pd.read_excel(file_path, engine="xlrd")
         except Exception as xls_err:
-            # If the file is mislabeled and is actually xlsx, try openpyxl
             try:
                 return pd.read_excel(file_path, engine="openpyxl")
             except Exception:
-                # If it is actually text/csv with the wrong extension, try CSV readers
                 try:
                     return pd.read_csv(file_path, low_memory=False)
                 except Exception:
@@ -91,7 +81,6 @@ def read_table_file(file_path: str) -> pd.DataFrame:
                     except Exception:
                         raise ValueError(
                             f"Could not read '{file_path}'. "
-                            f"It has .xls extension, but it does not appear to be a valid XLS workbook. "
                             f"It may be mislabeled, corrupted, or saved in another format. "
                             f"Original xlrd error: {xls_err}"
                         ) from xls_err
