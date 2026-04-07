@@ -15,7 +15,6 @@ from scipy.stats import linregress
 # ---------------------------
 N_CLUSTERS = 6
 STATIC_FILE = "STEEL_Bridges.csv"
-TS_FILE = "Steel_Bridges_20_and_Over_20_TimeSeries_Data_revised.csv"
 
 # ---------------------------
 # AWS config
@@ -88,16 +87,12 @@ def read_table_file(file_path: str) -> pd.DataFrame:
     raise ValueError(f"Unsupported file type: {ext}")
 
 # ---------------------------
-# Load data
+# Load raw data
 # ---------------------------
 @st.cache_data
 def load_data():
     if not os.path.exists(STATIC_FILE):
         st.error(f"Missing required file: {STATIC_FILE}")
-        st.stop()
-
-    if not os.path.exists(TS_FILE):
-        st.error(f"Missing required file: {TS_FILE}")
         st.stop()
 
     try:
@@ -106,27 +101,17 @@ def load_data():
         st.error(f"Failed to read static file '{STATIC_FILE}': {e}")
         st.stop()
 
-    try:
-        ts_df = read_table_file(TS_FILE)
-    except Exception as e:
-        st.error(f"Failed to read time-series file '{TS_FILE}': {e}")
-        st.stop()
-
     static_df.columns = static_df.columns.str.strip()
-    ts_df.columns = ts_df.columns.str.strip()
 
-    required_static_cols = ["STRUCTURE_NUMBER_008", "Year of Data"]
-    required_ts_cols = ["STRUCTURE_NUMBER_008", "Year of Data", "Bridge Health Index (Overall)"]
+    required_cols = [
+        "Year of Data",
+        "STRUCTURE_NUMBER_008",
+        "Bridge Health Index (Overall)"
+    ]
+    missing_cols = [c for c in required_cols if c not in static_df.columns]
 
-    missing_static = [c for c in required_static_cols if c not in static_df.columns]
-    missing_ts = [c for c in required_ts_cols if c not in ts_df.columns]
-
-    if missing_static:
-        st.error(f"Static file is missing required columns: {missing_static}")
-        st.stop()
-
-    if missing_ts:
-        st.error(f"Time-series file is missing required columns: {missing_ts}")
+    if missing_cols:
+        st.error(f"Static file is missing required columns: {missing_cols}")
         st.stop()
 
     numeric_cols_static = [
@@ -148,43 +133,93 @@ def load_data():
         "LONG_017"
     ]
 
-    numeric_cols_ts = [
-        "Year of Data",
-        "Bridge Health Index (Overall)",
-        "Bridge Health Index (Deck)",
-        "Bridge Health Index (Super)",
-        "Bridge Health Index (Sub)"
-    ]
-
     for col in numeric_cols_static:
         if col in static_df.columns:
             static_df[col] = pd.to_numeric(static_df[col], errors="coerce")
 
-    for col in numeric_cols_ts:
-        if col in ts_df.columns:
-            ts_df[col] = pd.to_numeric(ts_df[col], errors="coerce")
-
     static_df["STRUCTURE_NUMBER_008"] = static_df["STRUCTURE_NUMBER_008"].astype(str).str.strip()
-    ts_df["STRUCTURE_NUMBER_008"] = ts_df["STRUCTURE_NUMBER_008"].astype(str).str.strip()
-
     static_df = static_df.dropna(subset=["STRUCTURE_NUMBER_008", "Year of Data"])
-    ts_df = ts_df.dropna(subset=["STRUCTURE_NUMBER_008", "Year of Data", "Bridge Health Index (Overall)"])
-
     static_df["Year of Data"] = static_df["Year of Data"].astype(int)
-    ts_df["Year of Data"] = ts_df["Year of Data"].astype(int)
 
-    return static_df, ts_df
+    return static_df
 
 # ---------------------------
-# Prepare analysis
+# Prepare analysis using the SAME logic as notebook
 # ---------------------------
 @st.cache_data
-def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
-    df = ts_df[
-        ["STRUCTURE_NUMBER_008", "Year of Data", "Bridge Health Index (Overall)"]
-    ].dropna()
+def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
+    # ==========================================
+    # STEP 1: Keep needed columns
+    # ==========================================
+    df = static_df[[
+        "Year of Data",
+        "STRUCTURE_NUMBER_008",
+        "Bridge Health Index (Overall)",
+        "Bridge Health Index (Deck)",
+        "Bridge Health Index (Super)",
+        "Bridge Health Index (Sub)"
+    ]].copy()
 
-    pivot_df = df.pivot(
+    df = df.dropna(subset=[
+        "Year of Data",
+        "STRUCTURE_NUMBER_008",
+        "Bridge Health Index (Overall)"
+    ])
+
+    # ==========================================
+    # STEP 2: Keep bridges with >= 20 records
+    # ==========================================
+    counts = df["STRUCTURE_NUMBER_008"].value_counts()
+    structure_ids_20 = counts[counts >= 20].index
+    df_filtered = df[df["STRUCTURE_NUMBER_008"].isin(structure_ids_20)].copy()
+
+    # ==========================================
+    # STEP 3: Remove bridges with constant BHI
+    # for 20 consecutive years
+    # ==========================================
+    df_check = df_filtered[[
+        "STRUCTURE_NUMBER_008",
+        "Year of Data",
+        "Bridge Health Index (Overall)"
+    ]].dropna().copy()
+
+    df_check["Year of Data"] = df_check["Year of Data"].astype(int)
+    df_check = df_check.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"])
+
+    unchanged_bridges = []
+
+    for bridge_id, group in df_check.groupby("STRUCTURE_NUMBER_008"):
+        group = group.sort_values("Year of Data")
+        years = group["Year of Data"].tolist()
+        values = group["Bridge Health Index (Overall)"].tolist()
+
+        for i in range(len(values) - 19):
+            same_values = all(v == values[i] for v in values[i:i+20])
+            consecutive_years = all(
+                y2 - y1 == 1 for y1, y2 in zip(years[i:i+19], years[i+1:i+20])
+            )
+
+            if same_values and consecutive_years:
+                unchanged_bridges.append(bridge_id)
+                break
+
+    df_filtered_cleaned = df_filtered[
+        ~df_filtered["STRUCTURE_NUMBER_008"].isin(unchanged_bridges)
+    ].copy()
+
+    # This becomes the time-series dataset used downstream
+    ts_df = df_filtered_cleaned.copy()
+
+    # ==========================================
+    # STEP 4: Pivot and fill missing values
+    # ==========================================
+    df_ts = ts_df[[
+        "STRUCTURE_NUMBER_008",
+        "Year of Data",
+        "Bridge Health Index (Overall)"
+    ]].dropna()
+
+    pivot_df = df_ts.pivot(
         index="STRUCTURE_NUMBER_008",
         columns="Year of Data",
         values="Bridge Health Index (Overall)"
@@ -195,12 +230,19 @@ def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
 
     filtered_df = pivot_df.copy()
 
+    # ==========================================
+    # STEP 5: KMeans clustering (same notebook logic)
+    # no standardization for final clustering
+    # ==========================================
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     cluster_labels = kmeans.fit_predict(filtered_df)
 
     clustered = pivot_df.copy()
     clustered["Cluster"] = cluster_labels
 
+    # ==========================================
+    # STEP 6: Bridge slopes
+    # ==========================================
     slopes = []
     for bridge_id, row in pivot_df.iterrows():
         y = row.values.astype(float)
@@ -218,6 +260,9 @@ def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
 
     slope_df = pd.DataFrame(slopes)
 
+    # ==========================================
+    # STEP 7: Merge summary with latest bridge data
+    # ==========================================
     cluster_df = clustered[["Cluster"]].reset_index()
     bridge_summary = cluster_df.merge(slope_df, on="STRUCTURE_NUMBER_008", how="left")
 
@@ -236,23 +281,39 @@ def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
     years = [c for c in pivot_df.columns.tolist() if isinstance(c, (int, np.integer))]
     cluster_sizes = bridge_summary["Cluster"].value_counts().sort_index()
 
+    preprocessing_summary = {
+        "raw_rows": int(len(static_df)),
+        "rows_after_required_fields": int(len(df)),
+        "bridges_with_20plus_records": int(len(structure_ids_20)),
+        "constant_20year_bridges_removed": int(len(set(unchanged_bridges))),
+        "final_rows_used": int(len(ts_df)),
+        "final_unique_bridges": int(ts_df["STRUCTURE_NUMBER_008"].nunique())
+    }
+
     return {
+        "ts_df": ts_df,
         "pivot_df": pivot_df,
         "clustered_df": clustered,
         "bridge_summary": bridge_summary,
         "years": years,
         "cluster_sizes": cluster_sizes,
-        "kmeans": kmeans
+        "kmeans": kmeans,
+        "preprocessing_summary": preprocessing_summary
     }
 
-static_df, ts_df = load_data()
-analysis = prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS)
+# ---------------------------
+# Run pipeline
+# ---------------------------
+static_df = load_data()
+analysis = prepare_analysis(static_df, n_clusters=N_CLUSTERS)
 
+ts_df = analysis["ts_df"]
 pivot_df = analysis["pivot_df"]
 clustered_df = analysis["clustered_df"]
 bridge_summary = analysis["bridge_summary"]
 years_available = analysis["years"]
 cluster_sizes = analysis["cluster_sizes"]
+preprocessing_summary = analysis["preprocessing_summary"]
 
 bridge_ids = sorted(pivot_df.index.astype(str).tolist())
 
@@ -307,18 +368,28 @@ def overall_dataset_summary():
 
     summary_df = pd.DataFrame({
         "Metric": [
-            "Total Bridges",
+            "Total Bridges Used for Clustering",
             "Start Year",
             "End Year",
             "Number of Clusters",
-            "Average Deterioration Slope"
+            "Average Deterioration Slope",
+            "Raw Input Rows",
+            "Rows After Required Fields Filter",
+            "Bridges With 20+ Records",
+            "Constant 20-Year Bridges Removed",
+            "Final Rows Used"
         ],
         "Value": [
             total_bridges,
             year_min,
             year_max,
             N_CLUSTERS,
-            round(avg_slope, 4) if pd.notna(avg_slope) else np.nan
+            round(avg_slope, 4) if pd.notna(avg_slope) else np.nan,
+            preprocessing_summary["raw_rows"],
+            preprocessing_summary["rows_after_required_fields"],
+            preprocessing_summary["bridges_with_20plus_records"],
+            preprocessing_summary["constant_20year_bridges_removed"],
+            preprocessing_summary["final_rows_used"]
         ]
     })
 
@@ -331,9 +402,11 @@ def overall_dataset_summary():
 
     summary_text = (
         f"Here is the overall summary of the bridge deterioration dataset:\n\n"
-        f"Total bridges: {total_bridges:,}\n"
+        f"Total bridges used for clustering: {total_bridges:,}\n"
         f"Data span: {year_min} to {year_max}\n"
         f"Clusters: {N_CLUSTERS} clusters using KMeans on BHI trajectories\n"
+        f"Bridges with >=20 records before removal: {preprocessing_summary['bridges_with_20plus_records']:,}\n"
+        f"Constant 20-year bridges removed: {preprocessing_summary['constant_20year_bridges_removed']:,}\n"
         f"Cluster sizes:\n" + "\n".join(cluster_lines) + "\n"
         f"Average deterioration slope: {avg_slope_text} BHI points per year\n\n"
         f"The tables below show the dataset summary and cluster distribution."
@@ -604,8 +677,13 @@ You answer questions about steel bridge Bridge Health Index (BHI) time-series da
 bridge-level deterioration trends, and KMeans clustering results.
 
 Important:
-- The clustering was performed using the raw interpolated pivot table of
-  'Bridge Health Index (Overall)' by year, without standardization.
+- The app preprocesses raw bridge data before clustering:
+  1) keeps bridges with at least 20 records
+  2) removes bridges whose overall BHI stays constant for 20 consecutive years
+  3) pivots the cleaned time-series
+  4) interpolates/fills missing values
+  5) applies KMeans clustering to the raw interpolated trajectories
+- The clustering was performed without standardization.
 - The number of clusters is {N_CLUSTERS}.
 
 Available analysis concepts:
@@ -625,6 +703,7 @@ Rules:
 - If a user asks for a plot, chart, trend, or visualize request, use the matching tool.
 - When the overall dataset summary is requested, keep the text short because tables are shown separately.
 """
+
 
 def get_tool_config():
     return {
@@ -1007,12 +1086,14 @@ example_3 = example_ids[2] if len(example_ids) > 2 else example_1
 
 with st.sidebar:
     st.subheader("Dataset")
-    st.write(f"Bridge records: {len(static_df):,}")
-    st.write(f"Time-series records: {len(ts_df):,}")
-    st.write(f"Usable bridges: {pivot_df.shape[0]:,}")
+    st.write(f"Raw bridge records: {len(static_df):,}")
+    st.write(f"Processed time-series records: {len(ts_df):,}")
+    st.write(f"Usable bridges after preprocessing: {pivot_df.shape[0]:,}")
     st.write(f"Years: {min(years_available)}–{max(years_available)}")
-    st.write(f"Time-series file used: {TS_FILE}")
+    st.write(f"Source file used: {STATIC_FILE}")
     st.write(f"AWS Region: {AWS_REGION}")
+    st.write(f"Bridges with 20+ records: {preprocessing_summary['bridges_with_20plus_records']:,}")
+    st.write(f"Constant 20-year bridges removed: {preprocessing_summary['constant_20year_bridges_removed']:,}")
     st.caption("Use a bridge ID from STRUCTURE_NUMBER_008")
     st.write("Example questions:")
     st.markdown(f"""
