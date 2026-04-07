@@ -126,7 +126,6 @@ def load_data():
 
 # ---------------------------
 # Prepare analysis
-# EXACT original notebook logic
 # ---------------------------
 @st.cache_data
 def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
@@ -163,8 +162,8 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
         values = group["Bridge Health Index (Overall)"].tolist()
 
         for i in range(len(values) - 20):
-            if all(v == values[i] for v in values[i:i+20]) and \
-               all(y2 - y1 == 1 for y1, y2 in zip(years[i:i+19], years[i+1:i+20])):
+            if all(v == values[i] for v in values[i:i + 20]) and \
+               all(y2 - y1 == 1 for y1, y2 in zip(years[i:i + 19], years[i + 1:i + 20])):
                 unchanged_bridges.append(bridge_id)
                 break
 
@@ -273,6 +272,33 @@ preprocessing_summary = analysis["preprocessing_summary"]
 bridge_ids = sorted(pivot_df.index.astype(str).tolist())
 
 # ---------------------------
+# Session state init
+# ---------------------------
+def initialize_session_state():
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {
+                "role": "assistant",
+                "content": "Ask me about bridge deterioration trends, bridge profiles, clusters, Bridge Health Index patterns, or inspect and browse the dataset."
+            }
+        ]
+
+    if "pending_compare_cluster" not in st.session_state:
+        st.session_state.pending_compare_cluster = None
+
+    if "last_result_context" not in st.session_state:
+        st.session_state.last_result_context = {
+            "bridge_ids": None,
+            "cluster_ids": None,
+            "year": None,
+            "label": None,
+            "result_type": None,
+            "question": None
+        }
+
+initialize_session_state()
+
+# ---------------------------
 # Helpers
 # ---------------------------
 def find_best_bridge_match(bridge_id: str):
@@ -297,14 +323,18 @@ def find_best_bridge_match(bridge_id: str):
 
 
 def extract_top_n(user_query, default=5):
-    match = re.search(r"top\s+(\d+)", user_query.lower())
-    if match:
-        return int(match.group(1))
-
-    match = re.search(r"show\s+the\s+(\d+)", user_query.lower())
-    if match:
-        return int(match.group(1))
-
+    patterns = [
+        r"top\s+(\d+)",
+        r"show\s+the\s+(\d+)",
+        r"show\s+me\s+the\s+(\d+)",
+        r"\b(\d+)\s+worst\b",
+        r"\b(\d+)\s+best\b"
+    ]
+    q = user_query.lower()
+    for pattern in patterns:
+        match = re.search(pattern, q)
+        if match:
+            return int(match.group(1))
     return default
 
 
@@ -342,10 +372,6 @@ def clean_year_built(series):
 
 
 def make_json_safe(obj):
-    """
-    Recursively convert objects into Bedrock-safe JSON values.
-    Handles pandas, numpy, NaN, inf, timestamps, and nested structures.
-    """
     if obj is None:
         return None
 
@@ -466,51 +492,336 @@ def render_paginated_dataframe(df, key_prefix="data_viewer", title="Data Explore
     )
 
 # ---------------------------
-# Follow-up bridge memory helpers
+# Conversational follow-up logic
 # ---------------------------
-def is_multi_bridge_followup(text: str):
-    q = text.lower().strip()
-    trigger_phrases = [
+def has_bridge_context():
+    ctx = st.session_state.last_result_context
+    return bool(ctx.get("bridge_ids"))
+
+
+def is_contextual_followup(question: str):
+    q = question.lower().strip()
+
+    explicit_reference_phrases = [
         "these bridges",
         "those bridges",
         "these 5 bridges",
         "those 5 bridges",
         "these five bridges",
-        "trend for these",
-        "trend for those",
-        "plot the trend for these",
-        "plot trend for these",
-        "show me the trend for these",
-        "show trend for these",
-        "show their trend",
-        "plot their trend",
-        "trend for them",
-        "plot them",
-        "show me the trend for them",
-        "plot the trend for those bridges"
+        "those five bridges",
+        "them",
+        "their trend",
+        "their profile",
+        "their profiles",
+        "these ones",
+        "those ones",
+        "which one",
+        "which bridge",
+        "among them",
+        "of these",
+        "of those"
     ]
-    return any(p in q for p in trigger_phrases)
+
+    analytical_followup_phrases = [
+        "deteriorated the fastest",
+        "deteriorated fastest",
+        "improved the most",
+        "improved most",
+        "average bhi",
+        "average overall bhi",
+        "average of these bridges",
+        "average of them",
+        "trend for these",
+        "show trend",
+        "plot trend",
+        "compare them",
+        "compare these bridges",
+        "rank them",
+        "which is worst",
+        "which is best",
+        "fastest",
+        "slowest"
+    ]
+
+    return (
+        any(p in q for p in explicit_reference_phrases) or
+        any(p in q for p in analytical_followup_phrases)
+    )
 
 
-def initialize_session_state():
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {
-                "role": "assistant",
-                "content": "Ask me about bridge deterioration trends, bridge profiles, clusters, Bridge Health Index patterns, or inspect and browse the dataset."
-            }
+def resolve_followup_intent(question: str):
+    q = question.lower().strip()
+
+    if any(p in q for p in [
+        "trend for these", "trend for those", "show their trend", "show me the trend",
+        "plot trend", "plot the trend", "show trend", "trend for them"
+    ]):
+        return "multi_trend"
+
+    if any(p in q for p in [
+        "deteriorated the fastest", "deteriorated fastest", "fastest deterioration",
+        "which one deteriorated the fastest", "which bridge deteriorated the fastest",
+        "which one got worse the fastest"
+    ]):
+        return "fastest_deterioration"
+
+    if any(p in q for p in [
+        "improved the most", "improved most", "which one improved the most"
+    ]):
+        return "most_improved"
+
+    if any(p in q for p in [
+        "average bhi", "average overall bhi", "average of these bridges",
+        "average of them", "average bhi of these bridges"
+    ]):
+        return "average_bhi"
+
+    if any(p in q for p in [
+        "compare them", "compare these bridges", "compare those bridges"
+    ]):
+        return "compare_subset"
+
+    if any(p in q for p in [
+        "their profiles", "show their profiles", "give me their profiles",
+        "show profile for these bridges", "show me their profile"
+    ]):
+        return "profiles"
+
+    if any(p in q for p in [
+        "which is worst", "which one is worst", "worst among them"
+    ]):
+        return "worst_in_subset"
+
+    if any(p in q for p in [
+        "which is best", "which one is best", "best among them"
+    ]):
+        return "best_in_subset"
+
+    return None
+
+
+def compute_bridge_subset_metrics(bridge_id_list):
+    rows = []
+
+    for bridge_id in bridge_id_list:
+        matched = find_best_bridge_match(bridge_id)
+        if matched is None or matched not in pivot_df.index:
+            continue
+
+        ts_row = pivot_df.loc[matched].dropna()
+        if len(ts_row) < 2:
+            slope = np.nan
+            first_bhi = ts_row.iloc[0] if len(ts_row) > 0 else np.nan
+            last_bhi = ts_row.iloc[-1] if len(ts_row) > 0 else np.nan
+        else:
+            x = np.array(ts_row.index.tolist(), dtype=float)
+            y = np.array(ts_row.values, dtype=float)
+            slope, _, _, _, _ = linregress(x, y)
+            first_bhi = y[0]
+            last_bhi = y[-1]
+
+        summary_row = bridge_summary[bridge_summary["STRUCTURE_NUMBER_008"] == matched]
+        latest_bhi = summary_row["Bridge Health Index (Overall)"].iloc[0] if not summary_row.empty else np.nan
+        latest_year = summary_row["Year of Data"].iloc[0] if not summary_row.empty else np.nan
+        cluster = summary_row["Cluster"].iloc[0] if not summary_row.empty else np.nan
+
+        rows.append({
+            "STRUCTURE_NUMBER_008": matched,
+            "Latest Year": latest_year,
+            "Latest Overall BHI": latest_bhi,
+            "Slope": slope,
+            "First BHI": first_bhi,
+            "Last BHI": last_bhi,
+            "Net Change": (last_bhi - first_bhi) if pd.notna(first_bhi) and pd.notna(last_bhi) else np.nan,
+            "Cluster": cluster
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows)
+
+
+def analyze_bridge_subset(question, bridge_id_list):
+    subset_df = compute_bridge_subset_metrics(bridge_id_list)
+
+    if subset_df.empty:
+        return {
+            "text": "I couldn’t find valid time-series data for the selected bridges.",
+            "bridge_ids": bridge_id_list,
+            "label": "subset_analysis_empty"
+        }
+
+    intent = resolve_followup_intent(question)
+
+    if intent == "fastest_deterioration":
+        ranked = subset_df.sort_values("Slope", ascending=True).copy()
+        winner = ranked.iloc[0]
+
+        lines = [
+            "Deterioration analysis for the selected bridges:",
+            ""
         ]
+        for _, row in ranked.iterrows():
+            lines.append(f"- Bridge {row['STRUCTURE_NUMBER_008']}: slope {row['Slope']:.3f}")
 
-    if "pending_compare_cluster" not in st.session_state:
-        st.session_state.pending_compare_cluster = None
+        lines.append("")
+        lines.append(
+            f"The bridge that deteriorated the fastest among these bridges is "
+            f"{winner['STRUCTURE_NUMBER_008']} with a slope of {winner['Slope']:.3f}."
+        )
 
-    if "last_bridge_result_ids" not in st.session_state:
-        st.session_state.last_bridge_result_ids = None
+        return {
+            "text": "\n".join(lines),
+            "analysis_df": ranked[["STRUCTURE_NUMBER_008", "Slope", "Latest Overall BHI", "Cluster"]].copy(),
+            "execution_steps": [
+                "Detected a related follow-up question referring to the previous bridge set.",
+                "Computed deterioration slope for each bridge using its BHI time series.",
+                "Ranked the bridges by slope from most negative to least negative.",
+                "Returned the fastest deteriorating bridge from the selected subset only."
+            ],
+            "bridge_ids": bridge_id_list,
+            "label": "subset_fastest_deterioration"
+        }
 
-    if "last_bridge_result_label" not in st.session_state:
-        st.session_state.last_bridge_result_label = None
+    if intent == "most_improved":
+        ranked = subset_df.sort_values("Slope", ascending=False).copy()
+        winner = ranked.iloc[0]
 
-initialize_session_state()
+        lines = [
+            "Improvement analysis for the selected bridges:",
+            ""
+        ]
+        for _, row in ranked.iterrows():
+            lines.append(f"- Bridge {row['STRUCTURE_NUMBER_008']}: slope {row['Slope']:.3f}")
+
+        lines.append("")
+        lines.append(
+            f"The bridge that improved the most among these bridges is "
+            f"{winner['STRUCTURE_NUMBER_008']} with a slope of {winner['Slope']:.3f}."
+        )
+
+        return {
+            "text": "\n".join(lines),
+            "analysis_df": ranked[["STRUCTURE_NUMBER_008", "Slope", "Latest Overall BHI", "Cluster"]].copy(),
+            "execution_steps": [
+                "Detected a related follow-up question referring to the previous bridge set.",
+                "Computed slope for each selected bridge.",
+                "Ranked the bridges by slope from highest to lowest.",
+                "Returned the most improved bridge from the selected subset only."
+            ],
+            "bridge_ids": bridge_id_list,
+            "label": "subset_most_improved"
+        }
+
+    if intent == "average_bhi":
+        avg_bhi = subset_df["Latest Overall BHI"].mean()
+
+        return {
+            "text": (
+                f"The average latest overall BHI for these {len(subset_df)} selected bridges "
+                f"is {avg_bhi:.2f}."
+            ),
+            "analysis_df": subset_df[["STRUCTURE_NUMBER_008", "Latest Overall BHI", "Slope", "Cluster"]].copy(),
+            "execution_steps": [
+                "Detected a related follow-up question referring to the previous bridge set.",
+                "Retrieved the latest overall BHI for each selected bridge.",
+                "Computed the mean across the selected subset only."
+            ],
+            "bridge_ids": bridge_id_list,
+            "label": "subset_average_bhi"
+        }
+
+    if intent == "compare_subset":
+        ranked = subset_df.sort_values("Latest Overall BHI", ascending=True).copy()
+        lines = ["Comparison of the selected bridges:"]
+        for _, row in ranked.iterrows():
+            lines.append(
+                f"- Bridge {row['STRUCTURE_NUMBER_008']}: latest BHI {row['Latest Overall BHI']:.2f}, "
+                f"slope {row['Slope']:.3f}, cluster {int(row['Cluster']) if pd.notna(row['Cluster']) else 'N/A'}"
+            )
+
+        return {
+            "text": "\n".join(lines),
+            "analysis_df": ranked[["STRUCTURE_NUMBER_008", "Latest Overall BHI", "Slope", "Cluster"]].copy(),
+            "execution_steps": [
+                "Detected a related follow-up question referring to the previous bridge set.",
+                "Pulled latest BHI and slope for each selected bridge.",
+                "Returned a comparison limited to the selected subset."
+            ],
+            "bridge_ids": bridge_id_list,
+            "label": "subset_compare"
+        }
+
+    if intent == "profiles":
+        lines = ["Profiles for the selected bridges:"]
+        for bid in bridge_id_list:
+            lines.append("")
+            lines.append(get_bridge_profile(bid))
+
+        return {
+            "text": "\n".join(lines),
+            "analysis_df": subset_df.copy(),
+            "bridge_ids": bridge_id_list,
+            "label": "subset_profiles"
+        }
+
+    if intent == "worst_in_subset":
+        ranked = subset_df.sort_values("Latest Overall BHI", ascending=True).copy()
+        winner = ranked.iloc[0]
+        return {
+            "text": (
+                f"The worst bridge among these selected bridges based on latest overall BHI is "
+                f"{winner['STRUCTURE_NUMBER_008']} with a BHI of {winner['Latest Overall BHI']:.2f}."
+            ),
+            "analysis_df": ranked[["STRUCTURE_NUMBER_008", "Latest Overall BHI", "Slope", "Cluster"]].copy(),
+            "bridge_ids": bridge_id_list,
+            "label": "subset_worst"
+        }
+
+    if intent == "best_in_subset":
+        ranked = subset_df.sort_values("Latest Overall BHI", ascending=False).copy()
+        winner = ranked.iloc[0]
+        return {
+            "text": (
+                f"The best bridge among these selected bridges based on latest overall BHI is "
+                f"{winner['STRUCTURE_NUMBER_008']} with a BHI of {winner['Latest Overall BHI']:.2f}."
+            ),
+            "analysis_df": ranked[["STRUCTURE_NUMBER_008", "Latest Overall BHI", "Slope", "Cluster"]].copy(),
+            "bridge_ids": bridge_id_list,
+            "label": "subset_best"
+        }
+
+    if intent == "multi_trend":
+        return {
+            "text": "Showing the trend for these bridges:\n\n" + "\n".join([f"- {b}" for b in bridge_id_list]),
+            "figure": make_multi_bridge_trend_figure(bridge_id_list),
+            "analysis_df": subset_df[["STRUCTURE_NUMBER_008", "Latest Overall BHI", "Slope", "Cluster"]].copy(),
+            "execution_steps": [
+                "Detected a related follow-up question referring to the previous bridge set.",
+                "Loaded the previously selected bridge IDs from session state.",
+                "Plotted the BHI trend for the selected subset only."
+            ],
+            "bridge_ids": bridge_id_list,
+            "label": "subset_multi_trend"
+        }
+
+    return None
+
+
+def update_last_result_context(question, result):
+    bridge_ids_local = result.get("bridge_ids")
+    label = result.get("label")
+
+    if bridge_ids_local is not None:
+        st.session_state.last_result_context = {
+            "bridge_ids": bridge_ids_local,
+            "cluster_ids": None,
+            "year": None,
+            "label": label,
+            "result_type": "bridge_subset",
+            "question": question
+        }
 
 # ---------------------------
 # Dataset inspection functions
@@ -642,12 +953,10 @@ def browse_dataset_rows(offset=0, limit=25, columns=None):
         "total_rows": len(df)
     }
 
-
+# ---------------------------
+# Python execution fallback
+# ---------------------------
 def is_safe_python_code(code: str):
-    """
-    Basic safety filter for model-generated analysis code.
-    This is a guardrail, not a hardened sandbox.
-    """
     banned_patterns = [
         r"\bimport\s+os\b",
         r"\bimport\s+sys\b",
@@ -704,7 +1013,6 @@ Rules:
 User request:
 {user_request}
 """
-
     try:
         response = bedrock.converse(
             modelId=BEDROCK_MODEL_ID,
@@ -1197,7 +1505,7 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
     X_scaled = scaler.fit_transform(df_filtered_2)
 
     pca = PCA()
-    X_pca = pca.fit_transform(X_scaled)
+    pca.fit(X_scaled)
 
     loadings = pd.DataFrame(pca.components_, columns=df_filtered_2.columns)
     pc1_sorted = loadings.loc[0].sort_values(ascending=False)
@@ -1224,7 +1532,6 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
 
     return {
         "text": text,
-        "pc1_loadings": pc1_sorted.to_dict(),
         "pc1_table": pc1_df,
         "explained_variance_ratio_pc1": explained_var
     }
@@ -1244,7 +1551,6 @@ def get_top_deteriorating_bridges(top_n=5):
             f"- Bridge {bid}: slope {row['deterioration_slope_per_year']:.3f}, "
             f"latest overall BHI {row['Bridge Health Index (Overall)']:.2f}, cluster {int(row['Cluster'])}"
         )
-
     return {
         "text": "\n".join(lines),
         "bridge_ids": bridge_id_list,
@@ -1272,9 +1578,7 @@ def get_top_best_bridges(year, top_n=5):
     for _, row in subset.iterrows():
         bid = str(row["STRUCTURE_NUMBER_008"])
         bridge_id_list.append(bid)
-        lines.append(
-            f"- Bridge {bid}: {row['Bridge Health Index (Overall)']:.2f}"
-        )
+        lines.append(f"- Bridge {bid}: {row['Bridge Health Index (Overall)']:.2f}")
 
     return {
         "text": "\n".join(lines),
@@ -1302,9 +1606,7 @@ def get_top_worst_bridges(year, top_n=5):
     for _, row in subset.iterrows():
         bid = str(row["STRUCTURE_NUMBER_008"])
         bridge_id_list.append(bid)
-        lines.append(
-            f"- Bridge {bid}: {row['Bridge Health Index (Overall)']:.2f}"
-        )
+        lines.append(f"- Bridge {bid}: {row['Bridge Health Index (Overall)']:.2f}")
 
     return {
         "text": "\n".join(lines),
@@ -1326,11 +1628,11 @@ def make_bridge_trend_figure(bridge_id):
         return None
 
     row = pivot_df.loc[matched]
-    years = list(row.index)
+    years_local = list(row.index)
     values = list(row.values)
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(years, values, marker="o", linewidth=2)
+    ax.plot(years_local, values, marker="o", linewidth=2)
     ax.set_title(f"Bridge Trend: {matched}", fontsize=12, pad=10)
     ax.set_xlabel("Year")
     ax.set_ylabel("Bridge Health Index (Overall)")
@@ -1404,15 +1706,15 @@ def make_cluster_median_figure(cluster_id):
     if subset.empty:
         return None
 
-    years = subset.columns.tolist()
+    years_local = subset.columns.tolist()
     median_trend = subset.median(axis=0)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
 
     for _, row in subset.iterrows():
-        ax.plot(years, row.values, alpha=0.08, linewidth=1)
+        ax.plot(years_local, row.values, alpha=0.08, linewidth=1)
 
-    ax.plot(years, median_trend.values, linewidth=3, marker="o")
+    ax.plot(years_local, median_trend.values, linewidth=3, marker="o")
     ax.set_title(f"Cluster {cluster_id} Median Deterioration Trend", fontsize=12, pad=10)
     ax.set_xlabel("Year")
     ax.set_ylabel("Bridge Health Index (Overall)")
@@ -1436,13 +1738,13 @@ def make_compare_clusters_figure(cluster_id_1, cluster_id_2):
     if subset1.empty or subset2.empty:
         return None
 
-    years = subset1.columns.tolist()
+    years_local = subset1.columns.tolist()
     median_trend_1 = subset1.median(axis=0)
     median_trend_2 = subset2.median(axis=0)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(years, median_trend_1.values, marker="o", linewidth=2, label=f"Cluster {cluster_id_1}")
-    ax.plot(years, median_trend_2.values, marker="o", linewidth=2, label=f"Cluster {cluster_id_2}")
+    ax.plot(years_local, median_trend_1.values, marker="o", linewidth=2, label=f"Cluster {cluster_id_1}")
+    ax.plot(years_local, median_trend_2.values, marker="o", linewidth=2, label=f"Cluster {cluster_id_2}")
     ax.set_title(f"Cluster {cluster_id_1} vs Cluster {cluster_id_2}", fontsize=12, pad=10)
     ax.set_xlabel("Year")
     ax.set_ylabel("Bridge Health Index (Overall)")
@@ -1509,11 +1811,11 @@ Python analysis rule:
 - Do not guess.
 - Return a traceable summary of the analysis steps.
 
-Follow-up reference rule:
-- If the user says "these bridges", "those bridges", "these 5 bridges", "those 5", or "their trend",
-  first check whether a previous tool result returned bridge_ids.
-- If bridge_ids are available, use those IDs rather than asking for clarification.
-- Never replace such follow-up requests with the full dataset.
+Follow-up context rule:
+- If the user asks a related follow-up after a prior result, continue from that prior result.
+- If the prior result returned bridge_ids, and the new question is about "which one", "them", "these bridges", "those bridges", "their trend", "their average", "compare them", or similar, the question refers to the previously returned bridge_ids unless the user clearly says otherwise.
+- Never switch from a selected subset back to the full dataset for a related follow-up unless the user explicitly asks for all bridges.
+- If a subset context exists and the user asks "Which one deteriorated the fastest?", answer from that subset only.
 """
 
 def extract_text_from_content_blocks(content_blocks):
@@ -1533,10 +1835,10 @@ def extract_cluster_ids(text):
 
 def route_question(question: str):
     q = question.lower().strip()
-    cluster_ids = extract_cluster_ids(q)
+    cluster_ids_local = extract_cluster_ids(q)
 
     if (
-        len(cluster_ids) == 1 and
+        len(cluster_ids_local) == 1 and
         any(phrase in q for phrase in [
             "what features characterize",
             "what characterizes",
@@ -1550,11 +1852,11 @@ def route_question(question: str):
         return {
             "mode": "direct_tool",
             "tool_name": "cluster_pca_drivers",
-            "tool_input": {"cluster_id": cluster_ids[0], "top_n": 8}
+            "tool_input": {"cluster_id": cluster_ids_local[0], "top_n": 8}
         }
 
     if (
-        len(cluster_ids) == 1 and
+        len(cluster_ids_local) == 1 and
         any(phrase in q for phrase in [
             "why is cluster",
             "how is cluster",
@@ -1567,23 +1869,23 @@ def route_question(question: str):
         return {
             "mode": "direct_text",
             "text": (
-                f"Your question is ambiguous. Cluster {cluster_ids[0]} is different compared to which cluster?\n"
+                f"Your question is ambiguous. Cluster {cluster_ids_local[0]} is different compared to which cluster?\n"
                 f"You can ask:\n"
-                f"- Compare cluster {cluster_ids[0]} and cluster 1\n"
-                f"- Summarize cluster {cluster_ids[0]}\n"
-                f"- What features characterize cluster {cluster_ids[0]}?\n"
+                f"- Compare cluster {cluster_ids_local[0]} and cluster 1\n"
+                f"- Summarize cluster {cluster_ids_local[0]}\n"
+                f"- What features characterize cluster {cluster_ids_local[0]}?\n"
                 f"- Compare to cluster 2"
             ),
-            "pending_compare_cluster": cluster_ids[0]
+            "pending_compare_cluster": cluster_ids_local[0]
         }
 
-    if len(cluster_ids) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
+    if len(cluster_ids_local) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
         return {
             "mode": "direct_tool",
             "tool_name": "compare_clusters",
             "tool_input": {
-                "cluster_id_1": cluster_ids[0],
-                "cluster_id_2": cluster_ids[1]
+                "cluster_id_1": cluster_ids_local[0],
+                "cluster_id_2": cluster_ids_local[1]
             }
         }
 
@@ -1851,24 +2153,36 @@ def execute_tool(tool_name, tool_input):
 
     if tool_name == "bridge_profile":
         bridge_id = tool_input["bridge_id"]
-        return {"text": get_bridge_profile(bridge_id)}
+        matched = find_best_bridge_match(bridge_id)
+        return {
+            "text": get_bridge_profile(bridge_id),
+            "bridge_ids": [matched] if matched else None,
+            "label": "bridge_profile_single"
+        }
 
     if tool_name == "bridge_trend":
         bridge_id = tool_input["bridge_id"]
+        matched = find_best_bridge_match(bridge_id)
         return {
             "text": get_bridge_trend(bridge_id),
             "bridge_id": bridge_id,
-            "show_trend_chart": True
+            "show_trend_chart": True,
+            "bridge_ids": [matched] if matched else None,
+            "label": "bridge_trend_single"
         }
 
     if tool_name == "compare_bridges":
         bridge_id_1 = tool_input["bridge_id_1"]
         bridge_id_2 = tool_input["bridge_id_2"]
+        matched1 = find_best_bridge_match(bridge_id_1)
+        matched2 = find_best_bridge_match(bridge_id_2)
         return {
             "text": compare_two_bridges(bridge_id_1, bridge_id_2),
             "bridge_id_1": bridge_id_1,
             "bridge_id_2": bridge_id_2,
-            "show_compare_chart": True
+            "show_compare_chart": True,
+            "bridge_ids": [b for b in [matched1, matched2] if b is not None],
+            "label": "compare_two_bridges"
         }
 
     if tool_name == "cluster_summary":
@@ -1959,6 +2273,7 @@ def ask_bedrock_with_tools(user_prompt):
     pending_stdout = None
     pending_bridge_ids = None
     pending_label = None
+
     loops = 0
     max_loops = 6
 
@@ -2255,49 +2570,38 @@ def ask_bedrock_with_tools(user_prompt):
         "label": pending_label
     }
 
-
+# ---------------------------
+# Main answer router
+# ---------------------------
 def answer_question(question):
+    # 1) Handle general related follow-up to prior bridge subset
+    if has_bridge_context() and is_contextual_followup(question):
+        prior_bridge_ids = st.session_state.last_result_context.get("bridge_ids")
+        subset_result = analyze_bridge_subset(question, prior_bridge_ids)
+        if subset_result is not None:
+            return {
+                "text": subset_result.get("text"),
+                "figure": subset_result.get("figure"),
+                "summary_df": subset_result.get("summary_df"),
+                "cluster_df": subset_result.get("cluster_df"),
+                "pc1_table": subset_result.get("pc1_table"),
+                "schema_df": subset_result.get("schema_df"),
+                "column_df": subset_result.get("column_df"),
+                "values_df": subset_result.get("values_df"),
+                "preview_df": subset_result.get("preview_df"),
+                "browse_df": subset_result.get("browse_df"),
+                "analysis_df": subset_result.get("analysis_df"),
+                "generated_code": subset_result.get("generated_code"),
+                "execution_steps": subset_result.get("execution_steps"),
+                "stdout": subset_result.get("stdout"),
+                "bridge_ids": subset_result.get("bridge_ids"),
+                "label": subset_result.get("label")
+            }
+
+    # 2) Existing cluster pending compare
     pending_base = st.session_state.pending_compare_cluster
     followup_target = extract_compare_target(question)
 
-    # ---------------------------
-    # Handle bridge list follow-up
-    # ---------------------------
-    if is_multi_bridge_followup(question) and st.session_state.last_bridge_result_ids:
-        bridge_id_list = st.session_state.last_bridge_result_ids
-
-        lines = ["Showing the trend for these bridges:"]
-        for bid in bridge_id_list:
-            lines.append(f"- {bid}")
-
-        fig = make_multi_bridge_trend_figure(bridge_id_list)
-
-        return {
-            "text": "\n".join(lines),
-            "figure": fig,
-            "summary_df": None,
-            "cluster_df": None,
-            "pc1_table": None,
-            "schema_df": None,
-            "column_df": None,
-            "values_df": None,
-            "preview_df": None,
-            "browse_df": None,
-            "analysis_df": pd.DataFrame({"STRUCTURE_NUMBER_008": bridge_id_list}),
-            "generated_code": None,
-            "execution_steps": [
-                "Detected a follow-up request referring to the most recent bridge list.",
-                "Loaded the previously returned bridge IDs from session state.",
-                "Plotted the BHI trend for those bridges from pivot_df."
-            ],
-            "stdout": None,
-            "bridge_ids": bridge_id_list,
-            "label": st.session_state.last_bridge_result_label
-        }
-
-    # ---------------------------
-    # Existing pending cluster compare follow-up
-    # ---------------------------
     if pending_base is not None and followup_target is not None:
         result = execute_tool(
             "compare_clusters",
@@ -2331,6 +2635,7 @@ def answer_question(question):
             "label": result.get("label")
         }
 
+    # 3) Direct routing
     routed = route_question(question)
 
     if routed["mode"] == "direct_text":
@@ -2383,25 +2688,11 @@ def answer_question(question):
             "label": result.get("label")
         }
 
+    # 4) Bedrock + tool use
     st.session_state.pending_compare_cluster = None
     result = ask_bedrock_with_tools(question)
     fig = None
     chart = result.get("chart")
-
-    summary_df = result.get("summary_df")
-    cluster_df = result.get("cluster_df")
-    pc1_table = result.get("pc1_table")
-    schema_df = result.get("schema_df")
-    column_df = result.get("column_df")
-    values_df = result.get("values_df")
-    preview_df = result.get("preview_df")
-    browse_df = result.get("browse_df")
-    analysis_df = result.get("analysis_df")
-    generated_code = result.get("generated_code")
-    execution_steps = result.get("execution_steps")
-    stdout = result.get("stdout")
-    bridge_id_list = result.get("bridge_ids")
-    label = result.get("label")
 
     if chart:
         if chart["type"] == "trend":
@@ -2416,20 +2707,20 @@ def answer_question(question):
     return {
         "text": result.get("text"),
         "figure": fig,
-        "summary_df": summary_df,
-        "cluster_df": cluster_df,
-        "pc1_table": pc1_table,
-        "schema_df": schema_df,
-        "column_df": column_df,
-        "values_df": values_df,
-        "preview_df": preview_df,
-        "browse_df": browse_df,
-        "analysis_df": analysis_df,
-        "generated_code": generated_code,
-        "execution_steps": execution_steps,
-        "stdout": stdout,
-        "bridge_ids": bridge_id_list,
-        "label": label
+        "summary_df": result.get("summary_df"),
+        "cluster_df": result.get("cluster_df"),
+        "pc1_table": result.get("pc1_table"),
+        "schema_df": result.get("schema_df"),
+        "column_df": result.get("column_df"),
+        "values_df": result.get("values_df"),
+        "preview_df": result.get("preview_df"),
+        "browse_df": result.get("browse_df"),
+        "analysis_df": result.get("analysis_df"),
+        "generated_code": result.get("generated_code"),
+        "execution_steps": result.get("execution_steps"),
+        "stdout": result.get("stdout"),
+        "bridge_ids": result.get("bridge_ids"),
+        "label": result.get("label")
     }
 
 # ---------------------------
@@ -2438,11 +2729,9 @@ def answer_question(question):
 sample_df = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
 
 example_1 = sample_df.sample(1)["STRUCTURE_NUMBER_008"].iloc[0]
-
 example_2 = sample_df[
     sample_df["Cluster"] != sample_df[sample_df["STRUCTURE_NUMBER_008"] == example_1]["Cluster"].iloc[0]
 ].sample(1)["STRUCTURE_NUMBER_008"].iloc[0]
-
 example_3 = sample_df.sort_values("deterioration_slope_per_year").iloc[0]["STRUCTURE_NUMBER_008"]
 
 with st.sidebar:
@@ -2461,16 +2750,20 @@ with st.sidebar:
     - What columns are in the dataset?
     - Show me the first 10 rows of the dataset
     - Browse dataset rows
+    - Inspect the column YEAR_BUILT_027
+    - What values does SERVICE_ON_042A contain?
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
-    - Show me the trend for these 5 bridges
+    - Which one deteriorated the fastest?
+    - Show me the trend for these bridges
+    - What is the average BHI of these bridges?
+    - Give me their profiles
     - Show the 5 best bridges in 2020
     - Give me the profile for bridge {example_3}
     """)
 
     open_explorer = st.checkbox("Open dataset explorer")
 
-# render in main area, not sidebar
 if open_explorer:
     render_paginated_dataframe(
         static_df,
@@ -2554,11 +2847,7 @@ if user_prompt:
 
     result = answer_question(user_prompt)
 
-    # Save bridge-list memory for follow-up questions like:
-    # "show me the trend for these 5 bridges"
-    if result.get("bridge_ids") is not None:
-        st.session_state.last_bridge_result_ids = result["bridge_ids"]
-        st.session_state.last_bridge_result_label = result.get("label")
+    update_last_result_context(user_prompt, result)
 
     assistant_message = {
         "role": "assistant",
