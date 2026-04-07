@@ -55,7 +55,17 @@ st.caption("Amazon Bedrock + Streamlit + Bridge Health Index time-series cluster
 # File reader
 # ---------------------------
 def read_table_file(file_path: str) -> pd.DataFrame:
+    """
+    Robust table reader that handles:
+    - CSV
+    - XLSX via openpyxl
+    - XLS via xlrd
+    - mislabeled .xls files that are actually .xlsx or text/CSV
+    """
     ext = os.path.splitext(file_path)[1].lower()
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     if ext == ".csv":
         return pd.read_csv(file_path, low_memory=False)
@@ -64,7 +74,27 @@ def read_table_file(file_path: str) -> pd.DataFrame:
         return pd.read_excel(file_path, engine="openpyxl")
 
     if ext == ".xls":
-        return pd.read_excel(file_path, engine="xlrd")
+        # First try true old-style XLS
+        try:
+            return pd.read_excel(file_path, engine="xlrd")
+        except Exception as xls_err:
+            # If the file is mislabeled and is actually xlsx, try openpyxl
+            try:
+                return pd.read_excel(file_path, engine="openpyxl")
+            except Exception:
+                # If it is actually text/csv with the wrong extension, try CSV readers
+                try:
+                    return pd.read_csv(file_path, low_memory=False)
+                except Exception:
+                    try:
+                        return pd.read_csv(file_path, sep="\t", low_memory=False)
+                    except Exception:
+                        raise ValueError(
+                            f"Could not read '{file_path}'. "
+                            f"It has .xls extension, but it does not appear to be a valid XLS workbook. "
+                            f"It may be mislabeled, corrupted, or saved in another format. "
+                            f"Original xlrd error: {xls_err}"
+                        ) from xls_err
 
     raise ValueError(f"Unsupported file type: {ext}")
 
@@ -81,11 +111,34 @@ def load_data():
         st.error(f"Missing required file: {TS_FILE}")
         st.stop()
 
-    static_df = read_table_file(STATIC_FILE)
-    ts_df = read_table_file(TS_FILE)
+    try:
+        static_df = read_table_file(STATIC_FILE)
+    except Exception as e:
+        st.error(f"Failed to read static file '{STATIC_FILE}': {e}")
+        st.stop()
+
+    try:
+        ts_df = read_table_file(TS_FILE)
+    except Exception as e:
+        st.error(f"Failed to read time-series file '{TS_FILE}': {e}")
+        st.stop()
 
     static_df.columns = static_df.columns.str.strip()
     ts_df.columns = ts_df.columns.str.strip()
+
+    required_static_cols = ["STRUCTURE_NUMBER_008", "Year of Data"]
+    required_ts_cols = ["STRUCTURE_NUMBER_008", "Year of Data", "Bridge Health Index (Overall)"]
+
+    missing_static = [c for c in required_static_cols if c not in static_df.columns]
+    missing_ts = [c for c in required_ts_cols if c not in ts_df.columns]
+
+    if missing_static:
+        st.error(f"Static file is missing required columns: {missing_static}")
+        st.stop()
+
+    if missing_ts:
+        st.error(f"Time-series file is missing required columns: {missing_ts}")
+        st.stop()
 
     numeric_cols_static = [
         "Year of Data",
@@ -138,11 +191,9 @@ def load_data():
 # ---------------------------
 @st.cache_data
 def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
-    df = ts_df[[
-        "STRUCTURE_NUMBER_008",
-        "Year of Data",
-        "Bridge Health Index (Overall)"
-    ]].dropna()
+    df = ts_df[
+        ["STRUCTURE_NUMBER_008", "Year of Data", "Bridge Health Index (Overall)"]
+    ].dropna()
 
     pivot_df = df.pivot(
         index="STRUCTURE_NUMBER_008",
@@ -150,11 +201,12 @@ def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
         values="Bridge Health Index (Overall)"
     )
 
-    pivot_df = pivot_df.sort_index(axis=1).interpolate(axis=1, limit_direction="both").ffill(axis=1).bfill(axis=1)
+    pivot_df = pivot_df.sort_index(axis=1)
+    pivot_df = pivot_df.interpolate(axis=1, limit_direction="both").ffill(axis=1).bfill(axis=1)
 
     filtered_df = pivot_df.copy()
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     cluster_labels = kmeans.fit_predict(filtered_df)
 
     clustered = pivot_df.copy()
@@ -277,7 +329,7 @@ def overall_dataset_summary():
             year_min,
             year_max,
             N_CLUSTERS,
-            round(avg_slope, 4)
+            round(avg_slope, 4) if pd.notna(avg_slope) else np.nan
         ]
     })
 
@@ -286,13 +338,15 @@ def overall_dataset_summary():
         for _, row in cluster_df.iterrows()
     ]
 
+    avg_slope_text = f"{avg_slope:.4f}" if pd.notna(avg_slope) else "N/A"
+
     summary_text = (
         f"Here is the overall summary of the bridge deterioration dataset:\n\n"
         f"Total bridges: {total_bridges:,}\n"
         f"Data span: {year_min} to {year_max}\n"
         f"Clusters: {N_CLUSTERS} clusters using KMeans on BHI trajectories\n"
         f"Cluster sizes:\n" + "\n".join(cluster_lines) + "\n"
-        f"Average deterioration slope: {avg_slope:.4f} BHI points per year\n\n"
+        f"Average deterioration slope: {avg_slope_text} BHI points per year\n\n"
         f"The tables below show the dataset summary and cluster distribution."
     )
 
@@ -334,7 +388,7 @@ def get_bridge_profile(bridge_id):
     text = []
     for key, value in details.items():
         if pd.notna(value):
-            if isinstance(value, float):
+            if isinstance(value, (float, np.floating)):
                 text.append(f"{key}: {value:.2f}")
             else:
                 text.append(f"{key}: {value}")
@@ -367,7 +421,7 @@ def get_bridge_trend(bridge_id):
 
 
 def compare_two_bridges(bridge_id_1, bridge_id_2):
-    matched1 = find_bestBridge_match(bridge_id_1)
+    matched1 = find_best_bridge_match(bridge_id_1)
     matched2 = find_best_bridge_match(bridge_id_2)
 
     if matched1 is None:
@@ -582,7 +636,6 @@ Rules:
 - If a user asks for a plot, chart, trend, or visualize request, use the matching tool.
 - When the overall dataset summary is requested, keep the text short because tables are shown separately.
 """
-
 
 def get_tool_config():
     return {
