@@ -1606,7 +1606,7 @@ if user_prompt:
             st.pyplot(result["figure"])
 
         if result.get("pc1_table") is not None:
-        st.subheader("PC1 Loadings")
-        st.dataframe(result["pc1_table"], use_container_width=True)
+            st.subheader("PC1 Loadings")
+            st.dataframe(result["pc1_table"], use_container_width=True)
 
     st.session_state.messages.append(assistant_message)
