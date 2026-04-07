@@ -333,6 +333,116 @@ def clean_year_built(series):
     return s
 
 # ---------------------------
+# Dataset inspection functions
+# ---------------------------
+def get_dataset_schema(max_sample_values=5):
+    df = static_df.copy()
+
+    rows = []
+    for col in df.columns:
+        series = df[col]
+        dtype = str(series.dtype)
+        missing = int(series.isna().sum())
+        non_null = int(series.notna().sum())
+
+        sample_values = series.dropna().astype(str).unique()[:max_sample_values]
+        sample_values_text = ", ".join(sample_values) if len(sample_values) > 0 else "No non-null values"
+
+        rows.append({
+            "Column": col,
+            "Data Type": dtype,
+            "Non-Null Count": non_null,
+            "Missing Count": missing,
+            "Sample Values": sample_values_text
+        })
+
+    schema_df = pd.DataFrame(rows)
+
+    text = (
+        f"The dataset has {df.shape[0]:,} rows and {df.shape[1]:,} columns.\n\n"
+        f"The table below shows each column, its data type, missing values, and sample values."
+    )
+
+    return {
+        "text": text,
+        "schema_df": schema_df
+    }
+
+
+def inspect_column(column_name, max_unique=20):
+    df = static_df.copy()
+
+    if column_name not in df.columns:
+        matches = [c for c in df.columns if c.lower() == str(column_name).lower()]
+        if matches:
+            column_name = matches[0]
+        else:
+            contains = [c for c in df.columns if str(column_name).lower() in c.lower()]
+            if len(contains) == 1:
+                column_name = contains[0]
+            else:
+                return {
+                    "text": f"I couldn’t find a column named '{column_name}' in the dataset."
+                }
+
+    s = df[column_name]
+    dtype = str(s.dtype)
+    missing = int(s.isna().sum())
+    non_null = int(s.notna().sum())
+    unique_non_null = s.dropna().nunique()
+
+    result = {
+        "Column": column_name,
+        "Data Type": dtype,
+        "Non-Null Count": non_null,
+        "Missing Count": missing,
+        "Unique Non-Null Values": int(unique_non_null)
+    }
+
+    if pd.api.types.is_numeric_dtype(s):
+        numeric_s = pd.to_numeric(s, errors="coerce")
+        result.update({
+            "Min": numeric_s.min(),
+            "Max": numeric_s.max(),
+            "Mean": numeric_s.mean()
+        })
+
+    unique_values = s.dropna().astype(str).unique()[:max_unique]
+    values_df = pd.DataFrame({"Sample / Unique Values": unique_values})
+    column_df = pd.DataFrame([result])
+
+    text = (
+        f"Column inspection for '{column_name}':\n"
+        f"- Data type: {dtype}\n"
+        f"- Non-null count: {non_null}\n"
+        f"- Missing count: {missing}\n"
+        f"- Unique non-null values: {unique_non_null}"
+    )
+
+    if pd.api.types.is_numeric_dtype(s):
+        numeric_s = pd.to_numeric(s, errors="coerce")
+        mean_text = f"{numeric_s.mean():.4f}" if pd.notna(numeric_s.mean()) else "N/A"
+        text += (
+            f"\n- Min: {numeric_s.min()}"
+            f"\n- Max: {numeric_s.max()}"
+            f"\n- Mean: {mean_text}"
+        )
+
+    return {
+        "text": text,
+        "column_df": column_df,
+        "values_df": values_df
+    }
+
+
+def preview_dataset(n_rows=10):
+    df = static_df.copy().head(int(n_rows))
+    return {
+        "text": f"Showing the first {len(df)} rows of the dataset.",
+        "preview_df": df
+    }
+
+# ---------------------------
 # Analysis functions
 # ---------------------------
 def overall_dataset_summary():
@@ -946,11 +1056,17 @@ Available analyses include:
 - top best bridges by year
 - top worst bridges by year
 - PCA-based cluster feature drivers
+- dataset schema
+- dataset preview
+- inspect a column
 
 Important PCA rule:
 - If the user asks about key drivers, important features, PC1 loadings, or what characterizes a cluster, use the PCA tool.
 - Report PCA loadings as feature contributions to PC1.
 - Do not describe PCA loadings as causal unless the data explicitly supports causality.
+
+Dataset inspection rule:
+- If the user asks what columns exist, what values a column contains, what the dataset looks like, what data types are present, or to inspect the dataset, use the dataset inspection tools.
 """
 
 def extract_text_from_content_blocks(content_blocks):
@@ -1180,6 +1296,50 @@ def get_tool_config():
                         }
                     }
                 }
+            },
+            {
+                "toolSpec": {
+                    "name": "dataset_schema",
+                    "description": "Show the dataset columns, data types, missing counts, and sample values.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "max_sample_values": {"type": "integer"}
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "toolSpec": {
+                    "name": "inspect_column",
+                    "description": "Inspect one dataset column and show its type, missing values, summary, and sample or unique values.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "column_name": {"type": "string"},
+                                "max_unique": {"type": "integer"}
+                            },
+                            "required": ["column_name"]
+                        }
+                    }
+                }
+            },
+            {
+                "toolSpec": {
+                    "name": "preview_dataset",
+                    "description": "Show the first rows of the dataset for inspection.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "n_rows": {"type": "integer"}
+                            }
+                        }
+                    }
+                }
             }
         ]
     }
@@ -1250,6 +1410,19 @@ def execute_tool(tool_name, tool_input):
         top_n = int(tool_input.get("top_n", 5))
         return {"text": get_top_worst_bridges(year, top_n=top_n)}
 
+    if tool_name == "dataset_schema":
+        max_sample_values = int(tool_input.get("max_sample_values", 5))
+        return get_dataset_schema(max_sample_values=max_sample_values)
+
+    if tool_name == "inspect_column":
+        column_name = tool_input["column_name"]
+        max_unique = int(tool_input.get("max_unique", 20))
+        return inspect_column(column_name=column_name, max_unique=max_unique)
+
+    if tool_name == "preview_dataset":
+        n_rows = int(tool_input.get("n_rows", 10))
+        return preview_dataset(n_rows=n_rows)
+
     return {"text": f"Unknown tool: {tool_name}"}
 
 # ---------------------------
@@ -1267,6 +1440,10 @@ def ask_bedrock_with_tools(user_prompt):
     pending_summary_df = None
     pending_cluster_df = None
     pending_pc1_table = None
+    pending_schema_df = None
+    pending_column_df = None
+    pending_values_df = None
+    pending_preview_df = None
     loops = 0
     max_loops = 6
 
@@ -1283,7 +1460,11 @@ def ask_bedrock_with_tools(user_prompt):
             "chart": None,
             "summary_df": None,
             "cluster_df": None,
-            "pc1_table": None
+            "pc1_table": None,
+            "schema_df": None,
+            "column_df": None,
+            "values_df": None,
+            "preview_df": None
         }
     except Exception as e:
         return {
@@ -1291,7 +1472,11 @@ def ask_bedrock_with_tools(user_prompt):
             "chart": None,
             "summary_df": None,
             "cluster_df": None,
-            "pc1_table": None
+            "pc1_table": None,
+            "schema_df": None,
+            "column_df": None,
+            "values_df": None,
+            "preview_df": None
         }
 
     while loops < max_loops:
@@ -1303,14 +1488,28 @@ def ask_bedrock_with_tools(user_prompt):
 
         if stop_reason == "end_turn":
             final_text = extract_text_from_content_blocks(output_message["content"])
-            if not final_text and pending_summary_df is None and pending_cluster_df is None and pending_pc1_table is None:
+            if (
+                not final_text and
+                pending_summary_df is None and
+                pending_cluster_df is None and
+                pending_pc1_table is None and
+                pending_schema_df is None and
+                pending_column_df is None and
+                pending_values_df is None and
+                pending_preview_df is None
+            ):
                 final_text = "I could not generate a final answer."
+
             return {
                 "text": final_text,
                 "chart": pending_chart,
                 "summary_df": pending_summary_df,
                 "cluster_df": pending_cluster_df,
-                "pc1_table": pending_pc1_table
+                "pc1_table": pending_pc1_table,
+                "schema_df": pending_schema_df,
+                "column_df": pending_column_df,
+                "values_df": pending_values_df,
+                "preview_df": pending_preview_df
             }
 
         if stop_reason == "tool_use":
@@ -1335,6 +1534,18 @@ def ask_bedrock_with_tools(user_prompt):
 
                 if "cluster_df" in result:
                     pending_cluster_df = result["cluster_df"]
+
+                if "schema_df" in result:
+                    pending_schema_df = result["schema_df"]
+
+                if "column_df" in result:
+                    pending_column_df = result["column_df"]
+
+                if "values_df" in result:
+                    pending_values_df = result["values_df"]
+
+                if "preview_df" in result:
+                    pending_preview_df = result["preview_df"]
 
                 if result.get("show_trend_chart"):
                     pending_chart = {
@@ -1382,7 +1593,11 @@ def ask_bedrock_with_tools(user_prompt):
                     "chart": None,
                     "summary_df": None,
                     "cluster_df": None,
-                    "pc1_table": None
+                    "pc1_table": None,
+                    "schema_df": None,
+                    "column_df": None,
+                    "values_df": None,
+                    "preview_df": None
                 }
 
             messages.append({
@@ -1403,7 +1618,11 @@ def ask_bedrock_with_tools(user_prompt):
                     "chart": None,
                     "summary_df": pending_summary_df,
                     "cluster_df": pending_cluster_df,
-                    "pc1_table": pending_pc1_table
+                    "pc1_table": pending_pc1_table,
+                    "schema_df": pending_schema_df,
+                    "column_df": pending_column_df,
+                    "values_df": pending_values_df,
+                    "preview_df": pending_preview_df
                 }
             except Exception as e:
                 return {
@@ -1411,7 +1630,11 @@ def ask_bedrock_with_tools(user_prompt):
                     "chart": None,
                     "summary_df": pending_summary_df,
                     "cluster_df": pending_cluster_df,
-                    "pc1_table": pending_pc1_table
+                    "pc1_table": pending_pc1_table,
+                    "schema_df": pending_schema_df,
+                    "column_df": pending_column_df,
+                    "values_df": pending_values_df,
+                    "preview_df": pending_preview_df
                 }
 
             continue
@@ -1421,7 +1644,11 @@ def ask_bedrock_with_tools(user_prompt):
             "chart": None,
             "summary_df": pending_summary_df,
             "cluster_df": pending_cluster_df,
-            "pc1_table": pending_pc1_table
+            "pc1_table": pending_pc1_table,
+            "schema_df": pending_schema_df,
+            "column_df": pending_column_df,
+            "values_df": pending_values_df,
+            "preview_df": pending_preview_df
         }
 
     return {
@@ -1429,7 +1656,11 @@ def ask_bedrock_with_tools(user_prompt):
         "chart": None,
         "summary_df": pending_summary_df,
         "cluster_df": pending_cluster_df,
-        "pc1_table": pending_pc1_table
+        "pc1_table": pending_pc1_table,
+        "schema_df": pending_schema_df,
+        "column_df": pending_column_df,
+        "values_df": pending_values_df,
+        "preview_df": pending_preview_df
     }
 
 
@@ -1459,7 +1690,11 @@ def answer_question(question):
             "figure": fig,
             "summary_df": result.get("summary_df"),
             "cluster_df": result.get("cluster_df"),
-            "pc1_table": result.get("pc1_table")
+            "pc1_table": result.get("pc1_table"),
+            "schema_df": result.get("schema_df"),
+            "column_df": result.get("column_df"),
+            "values_df": result.get("values_df"),
+            "preview_df": result.get("preview_df")
         }
 
     routed = route_question(question)
@@ -1471,7 +1706,11 @@ def answer_question(question):
             "figure": None,
             "summary_df": None,
             "cluster_df": None,
-            "pc1_table": None
+            "pc1_table": None,
+            "schema_df": None,
+            "column_df": None,
+            "values_df": None,
+            "preview_df": None
         }
 
     if routed["mode"] == "direct_tool":
@@ -1489,7 +1728,11 @@ def answer_question(question):
             "figure": fig,
             "summary_df": result.get("summary_df"),
             "cluster_df": result.get("cluster_df"),
-            "pc1_table": result.get("pc1_table")
+            "pc1_table": result.get("pc1_table"),
+            "schema_df": result.get("schema_df"),
+            "column_df": result.get("column_df"),
+            "values_df": result.get("values_df"),
+            "preview_df": result.get("preview_df")
         }
 
     st.session_state.pending_compare_cluster = None
@@ -1500,6 +1743,10 @@ def answer_question(question):
     summary_df = result.get("summary_df")
     cluster_df = result.get("cluster_df")
     pc1_table = result.get("pc1_table")
+    schema_df = result.get("schema_df")
+    column_df = result.get("column_df")
+    values_df = result.get("values_df")
+    preview_df = result.get("preview_df")
 
     if chart:
         if chart["type"] == "trend":
@@ -1516,7 +1763,11 @@ def answer_question(question):
         "figure": fig,
         "summary_df": summary_df,
         "cluster_df": cluster_df,
-        "pc1_table": pc1_table
+        "pc1_table": pc1_table,
+        "schema_df": schema_df,
+        "column_df": column_df,
+        "values_df": values_df,
+        "preview_df": preview_df
     }
 
 # ---------------------------
@@ -1546,6 +1797,10 @@ with st.sidebar:
     - Compare cluster 2 and cluster 3
     - What features characterize cluster 5?
     - Why is cluster 5 different?
+    - What columns are in the dataset?
+    - Show me the first 10 rows of the dataset
+    - Inspect the column YEAR_BUILT_027
+    - What values does SERVICE_ON_042A contain?
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
     - Show the 5 best bridges in 2020
@@ -1559,7 +1814,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": "Ask me about bridge deterioration trends, bridge profiles, clusters, or Bridge Health Index patterns."
+            "content": "Ask me about bridge deterioration trends, bridge profiles, clusters, Bridge Health Index patterns, or inspect the dataset structure and columns."
         }
     ]
 
@@ -1579,6 +1834,22 @@ for message in st.session_state.messages:
         if "cluster_df" in message and message["cluster_df"] is not None:
             st.subheader("Cluster Distribution")
             st.dataframe(pd.DataFrame(message["cluster_df"]), use_container_width=True)
+
+        if "schema_df" in message and message["schema_df"] is not None:
+            st.subheader("Dataset Schema")
+            st.dataframe(pd.DataFrame(message["schema_df"]), use_container_width=True)
+
+        if "column_df" in message and message["column_df"] is not None:
+            st.subheader("Column Details")
+            st.dataframe(pd.DataFrame(message["column_df"]), use_container_width=True)
+
+        if "values_df" in message and message["values_df"] is not None:
+            st.subheader("Column Values")
+            st.dataframe(pd.DataFrame(message["values_df"]), use_container_width=True)
+
+        if "preview_df" in message and message["preview_df"] is not None:
+            st.subheader("Dataset Preview")
+            st.dataframe(pd.DataFrame(message["preview_df"]), use_container_width=True)
 
         if "figure_key" in message and message["figure_key"] in st.session_state:
             st.pyplot(st.session_state[message["figure_key"]])
@@ -1610,6 +1881,18 @@ if user_prompt:
     if result.get("cluster_df") is not None:
         assistant_message["cluster_df"] = result["cluster_df"].to_dict(orient="records")
 
+    if result.get("schema_df") is not None:
+        assistant_message["schema_df"] = result["schema_df"].to_dict(orient="records")
+
+    if result.get("column_df") is not None:
+        assistant_message["column_df"] = result["column_df"].to_dict(orient="records")
+
+    if result.get("values_df") is not None:
+        assistant_message["values_df"] = result["values_df"].to_dict(orient="records")
+
+    if result.get("preview_df") is not None:
+        assistant_message["preview_df"] = result["preview_df"].to_dict(orient="records")
+
     with st.chat_message("assistant"):
         if result.get("text"):
             st.write(result["text"])
@@ -1625,6 +1908,22 @@ if user_prompt:
         if result.get("cluster_df") is not None:
             st.subheader("Cluster Distribution")
             st.dataframe(result["cluster_df"], use_container_width=True)
+
+        if result.get("schema_df") is not None:
+            st.subheader("Dataset Schema")
+            st.dataframe(result["schema_df"], use_container_width=True)
+
+        if result.get("column_df") is not None:
+            st.subheader("Column Details")
+            st.dataframe(result["column_df"], use_container_width=True)
+
+        if result.get("values_df") is not None:
+            st.subheader("Column Values")
+            st.dataframe(result["values_df"], use_container_width=True)
+
+        if result.get("preview_df") is not None:
+            st.subheader("Dataset Preview")
+            st.dataframe(result["preview_df"], use_container_width=True)
 
         if result.get("figure") is not None:
             figure_key = f"fig_{len(st.session_state.messages)}"
