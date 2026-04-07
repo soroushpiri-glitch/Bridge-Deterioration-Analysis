@@ -59,8 +59,12 @@ def read_table_file(file_path: str) -> pd.DataFrame:
 
     if ext == ".csv":
         return pd.read_csv(file_path, low_memory=False)
-    if ext in [".xlsx", ".xls"]:
-        return pd.read_excel(file_path)
+
+    if ext == ".xlsx":
+        return pd.read_excel(file_path, engine="openpyxl")
+
+    if ext == ".xls":
+        return pd.read_excel(file_path, engine="xlrd")
 
     raise ValueError(f"Unsupported file type: {ext}")
 
@@ -134,9 +138,6 @@ def load_data():
 # ---------------------------
 @st.cache_data
 def prepare_analysis(static_df, ts_df, n_clusters=N_CLUSTERS):
-    # Match original notebook logic:
-    # use raw pivoted BHI overall values, interpolate/fill missing values,
-    # then run KMeans directly without scaling
     df = ts_df[[
         "STRUCTURE_NUMBER_008",
         "Year of Data",
@@ -366,7 +367,7 @@ def get_bridge_trend(bridge_id):
 
 
 def compare_two_bridges(bridge_id_1, bridge_id_2):
-    matched1 = find_best_bridge_match(bridge_id_1)
+    matched1 = find_bestBridge_match(bridge_id_1)
     matched2 = find_best_bridge_match(bridge_id_2)
 
     if matched1 is None:
