@@ -1408,7 +1408,6 @@ with st.sidebar:
     st.subheader("Dataset")
     st.write("This dataset contains 1,378 bridges.")
     st.write(f"Years: {min(years_available)}–{max(years_available)}")
-    st.write(f"Constant 20-year bridges removed: {preprocessing_summary['constant_20year_bridges_removed']:,}")
     st.caption("Use a bridge ID from STRUCTURE_NUMBER_008")
     st.write("Example questions:")
     st.markdown(f"""
