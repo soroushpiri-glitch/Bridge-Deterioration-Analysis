@@ -1046,11 +1046,20 @@ def answer_question(question):
 
 # ---------------------------
 # Sidebar
-# ---------------------------
-example_ids = bridge_ids[:3]
-example_1 = example_ids[0] if len(example_ids) > 0 else "N/A"
-example_2 = example_ids[1] if len(example_ids) > 1 else example_1
-example_3 = example_ids[2] if len(example_ids) > 2 else example_1
+# pick meaningful examples instead of arbitrary IDs
+
+sample_df = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
+
+# random example
+example_1 = sample_df.sample(1)["STRUCTURE_NUMBER_008"].iloc[0]
+
+# different cluster example
+example_2 = sample_df[
+    sample_df["Cluster"] != sample_df[sample_df["STRUCTURE_NUMBER_008"] == example_1]["Cluster"].iloc[0]
+].sample(1)["STRUCTURE_NUMBER_008"].iloc[0]
+
+# worst deterioration example
+example_3 = sample_df.sort_values("deterioration_slope_per_year").iloc[0]["STRUCTURE_NUMBER_008"]
 
 with st.sidebar:
     st.subheader("Dataset")
