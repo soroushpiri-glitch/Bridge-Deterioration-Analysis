@@ -127,7 +127,6 @@ def load_data():
 # ---------------------------
 @st.cache_data
 def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
-    # exact original logic
     data = static_df.copy()
     data = data.dropna()
 
@@ -160,7 +159,6 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
         years = group["Year of Data"].tolist()
         values = group["Bridge Health Index (Overall)"].tolist()
 
-        # keep exact original logic
         for i in range(len(values) - 20):
             if all(v == values[i] for v in values[i:i+20]) and \
                all(y2 - y1 == 1 for y1, y2 in zip(years[i:i+19], years[i+1:i+20])):
@@ -300,6 +298,39 @@ def extract_top_n(user_query, default=5):
     if match:
         return int(match.group(1))
     return default
+
+
+def extract_single_cluster_id(text: str):
+    matches = re.findall(r"cluster\s+(\d+)", text.lower())
+    if matches:
+        return int(matches[0])
+    return None
+
+
+def extract_compare_target(text: str):
+    text = text.lower().strip()
+
+    m = re.search(r"(?:compare\s+(?:to|with)\s+)?cluster\s+(\d+)", text)
+    if m:
+        return int(m.group(1))
+
+    m = re.fullmatch(r"\s*(\d+)\s*", text)
+    if m:
+        return int(m.group(1))
+
+    return None
+
+
+def strip_thinking_blocks(text: str):
+    if not text:
+        return text
+    return re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+
+def clean_year_built(series):
+    s = pd.to_numeric(series, errors="coerce")
+    s[(s < 1800) | (s > 2100)] = np.nan
+    return s
 
 # ---------------------------
 # Analysis functions
@@ -463,11 +494,7 @@ def compare_two_bridges(bridge_id_1, bridge_id_2):
         f"{row2['deterioration_slope_per_year']:.3f} per year."
     )
 
-def clean_year_built(series):
-    s = pd.to_numeric(series, errors="coerce")
-    s[(s < 1800) | (s > 2100)] = np.nan
-    return s
-    
+
 def get_cluster_summary(cluster_id):
     try:
         cluster_id = int(cluster_id)
@@ -493,8 +520,8 @@ def get_cluster_summary(cluster_id):
         if col in subset.columns:
             subset[col] = pd.to_numeric(subset[col], errors="coerce")
 
-        if "YEAR_BUILT_027" in subset.columns:
-            subset["YEAR_BUILT_027"] = clean_year_built(subset["YEAR_BUILT_027"])
+    if "YEAR_BUILT_027" in subset.columns:
+        subset["YEAR_BUILT_027"] = clean_year_built(subset["YEAR_BUILT_027"])
 
     metrics = {
         "count": len(subset),
@@ -553,10 +580,10 @@ def compare_two_clusters(cluster_id_1, cluster_id_2):
         if col in subset2.columns:
             subset2[col] = pd.to_numeric(subset2[col], errors="coerce")
 
-        if "YEAR_BUILT_027" in subset1.columns:
-            subset1["YEAR_BUILT_027"] = clean_year_built(subset1["YEAR_BUILT_027"])
-        if "YEAR_BUILT_027" in subset2.columns:
-            subset2["YEAR_BUILT_027"] = clean_year_built(subset2["YEAR_BUILT_027"])
+    if "YEAR_BUILT_027" in subset1.columns:
+        subset1["YEAR_BUILT_027"] = clean_year_built(subset1["YEAR_BUILT_027"])
+    if "YEAR_BUILT_027" in subset2.columns:
+        subset2["YEAR_BUILT_027"] = clean_year_built(subset2["YEAR_BUILT_027"])
 
     metrics1 = {
         "count": len(subset1),
@@ -631,26 +658,14 @@ def compare_two_clusters(cluster_id_1, cluster_id_2):
 
     return text
 
+
 def get_cluster_pca_drivers(cluster_id, top_n=8):
-    """
-    Compute PCA for one cluster and return sorted PC1 loadings.
-    This follows the same logic the user used in the notebook:
-    - select bridges in the chosen cluster
-    - subset static data for those bridges
-    - keep numeric columns
-    - remove highly correlated features (>0.85)
-    - drop manually excluded columns
-    - standardize
-    - run PCA
-    - sort PC1 loadings
-    """
     try:
         cluster_id = int(cluster_id)
         top_n = int(top_n)
     except Exception:
         return {"text": f"Invalid cluster_id or top_n: cluster_id={cluster_id}, top_n={top_n}"}
 
-    # clustered_df uses STRUCTURE_NUMBER_008 as index and has Cluster column
     if "Cluster" not in clustered_df.columns:
         return {"text": "I couldn’t find cluster assignments in the dataset."}
 
@@ -660,10 +675,9 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
         return {"text": f"No bridges found in cluster {cluster_id}."}
 
     cluster_subset = cluster_subset.reset_index()
-    bridge_ids = cluster_subset["STRUCTURE_NUMBER_008"].astype(str).tolist()
+    bridge_ids_local = cluster_subset["STRUCTURE_NUMBER_008"].astype(str).tolist()
 
-    # Use the raw static dataframe already loaded in the app
-    cluster_static = static_df[static_df["STRUCTURE_NUMBER_008"].astype(str).isin(bridge_ids)].copy()
+    cluster_static = static_df[static_df["STRUCTURE_NUMBER_008"].astype(str).isin(bridge_ids_local)].copy()
 
     if cluster_static.empty:
         return {"text": f"I couldn’t find static records for cluster {cluster_id} bridges."}
@@ -677,13 +691,11 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
     if df_numeric.empty:
         return {"text": f"No numeric PCA input columns were available for cluster {cluster_id}."}
 
-    # correlation filter
     corr_matrix = df_numeric.corr().abs()
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > 0.85)]
     df_filtered = df_numeric.drop(columns=to_drop, errors="ignore")
 
-    # manual drop list from your notebook logic
     manual_drop = [
         "STRUCTURE_TYPE_043B",
         "OPERATING_RATING_064",
@@ -702,7 +714,6 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
                     f"Too few PCA variables remained for cluster {cluster_id}."
         }
 
-    # remove any remaining rows with NA in PCA inputs
     df_filtered_2 = df_filtered_2.dropna()
 
     if df_filtered_2.shape[0] < 2:
@@ -719,9 +730,10 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
 
     loadings = pd.DataFrame(pca.components_, columns=df_filtered_2.columns)
     pc1_sorted = loadings.loc[0].sort_values(ascending=False)
-    # convert sorted PC1 loadings to a table
+
     pc1_df = pc1_sorted.reset_index()
     pc1_df.columns = ["Feature", "PC1_Loading"]
+
     top_positive = pc1_sorted.head(top_n)
     top_negative = pc1_sorted.sort_values(ascending=True).head(top_n)
 
@@ -745,6 +757,8 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
         "pc1_table": pc1_df,
         "explained_variance_ratio_pc1": explained_var
     }
+
+
 def get_top_deteriorating_bridges(top_n=5):
     subset = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
     subset = subset.sort_values("deterioration_slope_per_year", ascending=True).head(top_n)
@@ -901,42 +915,116 @@ def make_compare_clusters_figure(cluster_id_1, cluster_id_2):
 # ---------------------------
 # Bedrock prompt + tools
 # ---------------------------
-SYSTEM_PROMPT = f"""
-You are a bridge deterioration analysis assistant.
+SYSTEM_PROMPT = """
+You are an AI assistant for analyzing bridge deterioration data.
+You have access to tools to retrieve real data.
 
-You answer questions about steel bridge Bridge Health Index (BHI) time-series data,
-bridge-level deterioration trends, and KMeans clustering results.
+You must ALWAYS use tools to answer questions about the dataset.
 
-Important:
-- The app follows this preprocessing pipeline before clustering:
-  1) read STEEL_Bridges.csv
-  2) apply dropna() to the full dataframe
-  3) keep bridges with at least 20 records
-  4) remove bridges with constant overall BHI for 20 consecutive years
-  5) pivot remaining overall BHI time-series by year
-  6) interpolate/fill missing values
-  7) apply KMeans clustering on the raw interpolated trajectories
-- The number of clusters is {N_CLUSTERS}.
-- Do not claim any additional preprocessing beyond this.
+You must only answer from tool outputs or dataset-derived results.
+If the requested information is missing, unavailable, ambiguous, or not supported by the data, say so clearly.
 
-Available analysis concepts:
-- bridge profile
-- bridge trend over time
-- comparison between two bridges
-- cluster summary
-- comparison between two clusters
+Do not guess, infer missing values, or invent explanations.
+
+If no tool result supports the answer, respond with:
+"I couldn’t find this information in the dataset."
+
+If the answer is partial, say:
+"I found partial information, but not enough to answer fully."
+
+You must NEVER answer using your own knowledge.
+If you do not use a tool, your answer is invalid.
+
+Available analyses include:
 - overall dataset summary
-- worst bridges in a specific year
-- best bridges in a specific year
-- fastest deteriorating bridges based on bridge-level slope
+- bridge profile
+- bridge trend
+- compare bridges
+- cluster summary
+- compare clusters
+- top deteriorating bridges
+- top best bridges by year
+- top worst bridges by year
+- PCA-based cluster feature drivers
 
-Rules:
-- Use tools whenever a user asks about the data.
-- Do not invent numeric values.
-- Keep answers concise, clear, and grounded in the data.
-- If a user asks for a plot, chart, trend, or visualize request, use the matching tool.
-- When the overall dataset summary is requested, keep the text short because tables are shown separately.
+Important PCA rule:
+- If the user asks about key drivers, important features, PC1 loadings, or what characterizes a cluster, use the PCA tool.
+- Report PCA loadings as feature contributions to PC1.
+- Do not describe PCA loadings as causal unless the data explicitly supports causality.
 """
+
+def extract_text_from_content_blocks(content_blocks):
+    parts = []
+    for block in content_blocks:
+        if "text" in block:
+            cleaned = strip_thinking_blocks(block["text"])
+            if cleaned:
+                parts.append(cleaned)
+    return "\n".join(parts).strip()
+
+
+def extract_cluster_ids(text):
+    matches = re.findall(r"cluster\s+(\d+)", text.lower())
+    return [int(x) for x in matches]
+
+
+def route_question(question: str):
+    q = question.lower().strip()
+    cluster_ids = extract_cluster_ids(q)
+
+    if (
+        len(cluster_ids) == 1 and
+        any(phrase in q for phrase in [
+            "what features characterize",
+            "what characterizes",
+            "main factors",
+            "important variables",
+            "key variables",
+            "key drivers",
+            "feature drivers"
+        ])
+    ):
+        return {
+            "mode": "direct_tool",
+            "tool_name": "cluster_pca_drivers",
+            "tool_input": {"cluster_id": cluster_ids[0], "top_n": 8}
+        }
+
+    if (
+        len(cluster_ids) == 1 and
+        any(phrase in q for phrase in [
+            "why is cluster",
+            "how is cluster",
+            "why cluster"
+        ]) and
+        "compare" not in q and
+        "vs" not in q and
+        "versus" not in q
+    ):
+        return {
+            "mode": "direct_text",
+            "text": (
+                f"Your question is ambiguous. Cluster {cluster_ids[0]} is different compared to which cluster?\n"
+                f"You can ask:\n"
+                f"- Compare cluster {cluster_ids[0]} and cluster 1\n"
+                f"- Summarize cluster {cluster_ids[0]}\n"
+                f"- What features characterize cluster {cluster_ids[0]}?\n"
+                f"- Compare to cluster 2"
+            ),
+            "pending_compare_cluster": cluster_ids[0]
+        }
+
+    if len(cluster_ids) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
+        return {
+            "mode": "direct_tool",
+            "tool_name": "compare_clusters",
+            "tool_input": {
+                "cluster_id_1": cluster_ids[0],
+                "cluster_id_2": cluster_ids[1]
+            }
+        }
+
+    return {"mode": "bedrock"}
 
 
 def get_tool_config():
@@ -1031,7 +1119,7 @@ def get_tool_config():
                     }
                 }
             },
-                        {
+            {
                 "toolSpec": {
                     "name": "cluster_pca_drivers",
                     "description": "Compute PCA for a selected cluster and return the strongest PC1 feature loadings that characterize that cluster.",
@@ -1167,113 +1255,6 @@ def execute_tool(tool_name, tool_input):
 # ---------------------------
 # Bedrock conversation
 # ---------------------------
-def extract_text_from_content_blocks(content_blocks):
-    parts = []
-    for block in content_blocks:
-        if "text" in block:
-            parts.append(block["text"])
-    return "\n".join(parts).strip()
-
-SYSTEM_PROMPT = """
-You are an AI assistant for analyzing bridge deterioration data.
-You have access to tools to retrieve real data.
-
-You must ALWAYS use tools to answer questions about the dataset.
-
-You must only answer from tool outputs or dataset-derived results.
-If the requested information is missing, unavailable, ambiguous, or not supported by the data, say so clearly.
-
-Do not guess, infer missing values, or invent explanations.
-
-If no tool result supports the answer, respond with:
-"I couldn’t find this information in the dataset."
-
-If the answer is partial, say:
-"I found partial information, but not enough to answer fully."
-
-You must NEVER answer using your own knowledge.
-If you do not use a tool, your answer is invalid.
-
-Available analyses include:
-- overall dataset summary
-- bridge profile
-- bridge trend
-- compare bridges
-- cluster summary
-- compare clusters
-- top deteriorating bridges
-- top best bridges by year
-- top worst bridges by year
-- PCA-based cluster feature drivers
-
-Important PCA rule:
-- If the user asks about key drivers, important features, PC1 loadings, or what characterizes a cluster, use the PCA tool.
-- Report PCA loadings as feature contributions to PC1.
-- Do not describe PCA loadings as causal unless the data explicitly supports causality.
-"""
-def extract_cluster_ids(text):
-    matches = re.findall(r"cluster\s+(\d+)", text.lower())
-    return [int(x) for x in matches]
-
-def route_question(question: str):
-    q = question.lower().strip()
-    cluster_ids = extract_cluster_ids(q)
-
-    # Questions about what characterizes one cluster -> PCA tool
-    if (
-        len(cluster_ids) == 1 and
-        any(phrase in q for phrase in [
-            "what features characterize",
-            "what characterizes",
-            "main factors",
-            "important variables",
-            "key variables",
-            "key drivers",
-            "feature drivers"
-        ])
-    ):
-        return {
-            "mode": "direct_tool",
-            "tool_name": "cluster_pca_drivers",
-            "tool_input": {"cluster_id": cluster_ids[0], "top_n": 8}
-        }
-
-    # Ambiguous "why is cluster X different?"
-    if (
-        len(cluster_ids) == 1 and
-        any(phrase in q for phrase in [
-            "why is cluster",
-            "how is cluster",
-            "why cluster"
-        ]) and
-        "compare" not in q and
-        "vs" not in q and
-        "versus" not in q
-    ):
-        return {
-            "mode": "direct_text",
-            "text": (
-                f"Your question is ambiguous. Cluster {cluster_ids[0]} is different compared to which cluster? "
-                f"You can ask:\n"
-                f"- Compare cluster {cluster_ids[0]} and cluster 1\n"
-                f"- Summarize cluster {cluster_ids[0]}\n"
-                f"- What features characterize cluster {cluster_ids[0]}?"
-            )
-        }
-
-    # Explicit compare question with two clusters
-    if len(cluster_ids) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
-        return {
-            "mode": "direct_tool",
-            "tool_name": "compare_clusters",
-            "tool_input": {
-                "cluster_id_1": cluster_ids[0],
-                "cluster_id_2": cluster_ids[1]
-            }
-        }
-
-    return {"mode": "bedrock"}
-    
 def ask_bedrock_with_tools(user_prompt):
     messages = [
         {
@@ -1301,14 +1282,16 @@ def ask_bedrock_with_tools(user_prompt):
             "text": f"Bedrock request failed: {e}",
             "chart": None,
             "summary_df": None,
-            "cluster_df": None
+            "cluster_df": None,
+            "pc1_table": None
         }
     except Exception as e:
         return {
             "text": f"Unexpected Bedrock error: {e}",
             "chart": None,
             "summary_df": None,
-            "cluster_df": None
+            "cluster_df": None,
+            "pc1_table": None
         }
 
     while loops < max_loops:
@@ -1320,7 +1303,7 @@ def ask_bedrock_with_tools(user_prompt):
 
         if stop_reason == "end_turn":
             final_text = extract_text_from_content_blocks(output_message["content"])
-            if not final_text and pending_summary_df is None and pending_cluster_df is None:
+            if not final_text and pending_summary_df is None and pending_cluster_df is None and pending_pc1_table is None:
                 final_text = "I could not generate a final answer."
             return {
                 "text": final_text,
@@ -1346,7 +1329,7 @@ def ask_bedrock_with_tools(user_prompt):
 
                 if "pc1_table" in result:
                     pending_pc1_table = result["pc1_table"]
-    
+
                 if "summary_df" in result:
                     pending_summary_df = result["summary_df"]
 
@@ -1398,7 +1381,8 @@ def ask_bedrock_with_tools(user_prompt):
                     "text": "The model requested tool use, but no valid tool call was returned.",
                     "chart": None,
                     "summary_df": None,
-                    "cluster_df": None
+                    "cluster_df": None,
+                    "pc1_table": None
                 }
 
             messages.append({
@@ -1418,14 +1402,16 @@ def ask_bedrock_with_tools(user_prompt):
                     "text": f"Bedrock follow-up request failed: {e}",
                     "chart": None,
                     "summary_df": pending_summary_df,
-                    "cluster_df": pending_cluster_df
+                    "cluster_df": pending_cluster_df,
+                    "pc1_table": pending_pc1_table
                 }
             except Exception as e:
                 return {
                     "text": f"Unexpected Bedrock follow-up error: {e}",
                     "chart": None,
                     "summary_df": pending_summary_df,
-                    "cluster_df": pending_cluster_df
+                    "cluster_df": pending_cluster_df,
+                    "pc1_table": pending_pc1_table
                 }
 
             continue
@@ -1434,21 +1420,52 @@ def ask_bedrock_with_tools(user_prompt):
             "text": "I could not complete the request.",
             "chart": None,
             "summary_df": pending_summary_df,
-            "cluster_df": pending_cluster_df
+            "cluster_df": pending_cluster_df,
+            "pc1_table": pending_pc1_table
         }
 
     return {
         "text": "The Bedrock tool loop reached its limit.",
         "chart": None,
         "summary_df": pending_summary_df,
-        "cluster_df": pending_cluster_df
+        "cluster_df": pending_cluster_df,
+        "pc1_table": pending_pc1_table
     }
 
 
 def answer_question(question):
+    if "pending_compare_cluster" not in st.session_state:
+        st.session_state.pending_compare_cluster = None
+
+    pending_base = st.session_state.pending_compare_cluster
+    followup_target = extract_compare_target(question)
+
+    if pending_base is not None and followup_target is not None:
+        result = execute_tool(
+            "compare_clusters",
+            {
+                "cluster_id_1": pending_base,
+                "cluster_id_2": followup_target
+            }
+        )
+        st.session_state.pending_compare_cluster = None
+
+        fig = None
+        if result.get("show_compare_clusters_chart"):
+            fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
+
+        return {
+            "text": result.get("text"),
+            "figure": fig,
+            "summary_df": result.get("summary_df"),
+            "cluster_df": result.get("cluster_df"),
+            "pc1_table": result.get("pc1_table")
+        }
+
     routed = route_question(question)
 
     if routed["mode"] == "direct_text":
+        st.session_state.pending_compare_cluster = routed.get("pending_compare_cluster")
         return {
             "text": routed["text"],
             "figure": None,
@@ -1458,6 +1475,7 @@ def answer_question(question):
         }
 
     if routed["mode"] == "direct_tool":
+        st.session_state.pending_compare_cluster = None
         result = execute_tool(routed["tool_name"], routed["tool_input"])
 
         fig = None
@@ -1474,6 +1492,7 @@ def answer_question(question):
             "pc1_table": result.get("pc1_table")
         }
 
+    st.session_state.pending_compare_cluster = None
     result = ask_bedrock_with_tools(question)
     fig = None
     chart = result.get("chart")
@@ -1499,6 +1518,7 @@ def answer_question(question):
         "cluster_df": cluster_df,
         "pc1_table": pc1_table
     }
+
 # ---------------------------
 # Sidebar
 # ---------------------------
@@ -1525,6 +1545,7 @@ with st.sidebar:
     - Summarize cluster 2
     - Compare cluster 2 and cluster 3
     - What features characterize cluster 5?
+    - Why is cluster 5 different?
     - Show the fastest deteriorating bridges
     - Show the 5 worst bridges in 2020
     - Show the 5 best bridges in 2020
@@ -1546,9 +1567,11 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         if message.get("content"):
             st.write(message["content"])
+
         if "pc1_table" in message and message["pc1_table"] is not None:
             st.subheader("PC1 Loadings")
             st.dataframe(pd.DataFrame(message["pc1_table"]), use_container_width=True)
+
         if "summary_df" in message and message["summary_df"] is not None:
             st.subheader("Dataset Summary")
             st.dataframe(pd.DataFrame(message["summary_df"]), use_container_width=True)
@@ -1591,6 +1614,10 @@ if user_prompt:
         if result.get("text"):
             st.write(result["text"])
 
+        if result.get("pc1_table") is not None:
+            st.subheader("PC1 Loadings")
+            st.dataframe(result["pc1_table"], use_container_width=True)
+
         if result.get("summary_df") is not None:
             st.subheader("Dataset Summary")
             st.dataframe(result["summary_df"], use_container_width=True)
@@ -1604,9 +1631,5 @@ if user_prompt:
             st.session_state[figure_key] = result["figure"]
             assistant_message["figure_key"] = figure_key
             st.pyplot(result["figure"])
-
-        if result.get("pc1_table") is not None:
-            st.subheader("PC1 Loadings")
-            st.dataframe(result["pc1_table"], use_container_width=True)
 
     st.session_state.messages.append(assistant_message)
