@@ -1963,12 +1963,15 @@ with st.sidebar:
     - Give me the profile for bridge {example_3}
     """)
 
-    if st.checkbox("Open dataset explorer"):
-        render_paginated_dataframe(
-            static_df,
-            key_prefix="sidebar_dataset",
-            title="Full Dataset Explorer"
-        )
+    open_explorer = st.checkbox("Open dataset explorer")
+
+# render in main area, not sidebar
+if open_explorer:
+    render_paginated_dataframe(
+        static_df,
+        key_prefix="main_dataset",
+        title="Full Dataset Explorer"
+    )
 
 # ---------------------------
 # Chat history
