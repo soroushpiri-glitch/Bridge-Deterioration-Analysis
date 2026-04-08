@@ -498,6 +498,10 @@ def has_bridge_context():
     ctx = st.session_state.last_result_context
     return bool(ctx.get("bridge_ids"))
 
+def has_cluster_context():
+    ctx = st.session_state.last_result_context
+    return bool(ctx.get("cluster_ids"))
+
 
 def is_contextual_followup(question: str):
     q = question.lower().strip()
@@ -547,6 +551,69 @@ def is_contextual_followup(question: str):
         any(p in q for p in explicit_reference_phrases) or
         any(p in q for p in analytical_followup_phrases)
     )
+
+
+def is_cluster_followup(question: str):
+    q = question.lower().strip()
+
+    phrases = [
+        "this cluster",
+        "that cluster",
+        "the cluster",
+        "it",
+        "what else can you do",
+        "what else can you analyze",
+        "more analysis",
+        "interesting analysis",
+        "deeper analysis",
+        "analyze it further",
+        "tell me more",
+        "what else about it",
+        "what else for this cluster"
+    ]
+
+    return any(p in q for p in phrases)
+
+
+def resolve_cluster_followup_intent(question: str):
+    q = question.lower().strip()
+
+    if any(p in q for p in [
+        "interesting analysis",
+        "deeper analysis",
+        "what else can you do",
+        "what else can you analyze",
+        "more analysis",
+        "tell me more",
+        "what else for this cluster"
+    ]):
+        return "cluster_deep_dive"
+
+    if any(p in q for p in [
+        "key drivers",
+        "important features",
+        "what characterizes",
+        "pca",
+        "pc1",
+        "loadings"
+    ]):
+        return "cluster_pca"
+
+    if any(p in q for p in [
+        "trend",
+        "median trend",
+        "show trend",
+        "plot trend"
+    ]):
+        return "cluster_trend"
+
+    if any(p in q for p in [
+        "summary",
+        "summarize"
+    ]):
+        return "cluster_summary"
+
+    return "cluster_deep_dive"
 
 
 def resolve_followup_intent(question: str):
@@ -811,6 +878,7 @@ def analyze_bridge_subset(question, bridge_id_list):
 
 def update_last_result_context(question, result):
     bridge_ids_local = result.get("bridge_ids")
+    cluster_ids_local = result.get("cluster_ids")
     label = result.get("label")
 
     if bridge_ids_local is not None:
@@ -822,6 +890,18 @@ def update_last_result_context(question, result):
             "result_type": "bridge_subset",
             "question": question
         }
+        return
+
+    if cluster_ids_local is not None:
+        st.session_state.last_result_context = {
+            "bridge_ids": None,
+            "cluster_ids": cluster_ids_local,
+            "year": None,
+            "label": label,
+            "result_type": "cluster",
+            "question": question
+        }
+        return
 
 # ---------------------------
 # Dataset inspection functions
@@ -996,6 +1076,13 @@ Available dataframes:
 - ts_df
 - clustered_df
 
+Important schema notes:
+- clustered_df contains cluster assignments.
+- In clustered_df, the cluster column is named 'Cluster'.
+- Bridge IDs are stored in 'STRUCTURE_NUMBER_008' if clustered_df has been reset_index(),
+  or may already be available as 'Bridge_ID'.
+- bridge_summary also contains 'Cluster' and 'STRUCTURE_NUMBER_008'.
+
 Rules:
 - Use only pandas (pd), numpy (np), and matplotlib.pyplot (plt) if needed.
 - Do not import os, sys, subprocess, pathlib, requests, or any network/file libraries.
@@ -1048,6 +1135,14 @@ def run_python_analysis(user_request: str):
             "stdout": None
         }
 
+    clustered_df_for_python = clustered_df.reset_index().copy()
+
+    if "STRUCTURE_NUMBER_008" in clustered_df_for_python.columns:
+        clustered_df_for_python["Bridge_ID"] = clustered_df_for_python["STRUCTURE_NUMBER_008"]
+
+    if "Cluster" in clustered_df_for_python.columns:
+        clustered_df_for_python["cluster"] = clustered_df_for_python["Cluster"]
+
     safe_globals = {
         "__builtins__": {
             "len": len,
@@ -1076,7 +1171,7 @@ def run_python_analysis(user_request: str):
         "bridge_summary": bridge_summary.copy(),
         "pivot_df": pivot_df.copy(),
         "ts_df": ts_df.copy(),
-        "clustered_df": clustered_df.copy(),
+        "clustered_df": clustered_df_for_python,
     }
 
     local_vars = {}
@@ -1619,6 +1714,131 @@ def get_top_worst_bridges(year, top_n=5):
         "label": f"top_{top_n}_worst_bridges_{year}"
     }
 
+def get_bridges_in_cluster(cluster_id):
+    try:
+        cluster_id = int(cluster_id)
+    except Exception:
+        return {"text": f"Invalid cluster id: {cluster_id}"}
+
+    if "Cluster" not in clustered_df.columns:
+        return {"text": "I couldn’t find cluster assignments in the dataset."}
+
+    subset = clustered_df[clustered_df["Cluster"] == cluster_id].copy()
+
+    if subset.empty:
+        return {"text": f"No bridges found in cluster {cluster_id}."}
+
+    subset = subset.reset_index()
+
+    if "STRUCTURE_NUMBER_008" not in subset.columns:
+        return {
+            "text": "I found partial information, but not enough to answer fully."
+        }
+
+    result_df = subset[["STRUCTURE_NUMBER_008"]].copy()
+    result_df = result_df.rename(columns={"STRUCTURE_NUMBER_008": "Bridge ID"})
+
+    bridge_ids_local = result_df["Bridge ID"].astype(str).tolist()
+
+    return {
+        "text": f"I found {len(result_df)} bridges in cluster {cluster_id}.",
+        "analysis_df": result_df,
+        "bridge_ids": bridge_ids_local,
+        "label": f"bridges_in_cluster_{cluster_id}"
+    }
+
+
+def get_cluster_deep_dive(cluster_id):
+    try:
+        cluster_id = int(cluster_id)
+    except Exception:
+        return {"text": f"Invalid cluster id: {cluster_id}"}
+
+    subset = bridge_summary[bridge_summary["Cluster"] == cluster_id].copy()
+    if subset.empty:
+        return {"text": f"No bridges found in cluster {cluster_id}."}
+
+    numeric_cols = [
+        "Bridge Health Index (Overall)",
+        "Bridge Health Index (Deck)",
+        "Bridge Health Index (Super)",
+        "Bridge Health Index (Sub)",
+        "YEAR_BUILT_027",
+        "ADT_029",
+        "MAX_SPAN_LEN_MT_048",
+        "STRUCTURE_LEN_MT_049",
+        "DECK_WIDTH_MT_052",
+        "deterioration_slope_per_year"
+    ]
+
+    for col in numeric_cols:
+        if col in subset.columns:
+            subset[col] = pd.to_numeric(subset[col], errors="coerce")
+
+    if "YEAR_BUILT_027" in subset.columns:
+        subset["YEAR_BUILT_027"] = clean_year_built(subset["YEAR_BUILT_027"])
+
+    result_df = pd.DataFrame({
+        "Metric": [
+            "Bridge count",
+            "Avg overall BHI",
+            "Median overall BHI",
+            "Min overall BHI",
+            "Max overall BHI",
+            "Avg deterioration slope",
+            "Median deterioration slope",
+            "Worst slope",
+            "Best slope",
+            "Avg year built",
+            "Avg ADT",
+            "Avg max span length",
+            "Avg structure length",
+            "Avg deck width"
+        ],
+        "Value": [
+            len(subset),
+            subset["Bridge Health Index (Overall)"].mean(),
+            subset["Bridge Health Index (Overall)"].median(),
+            subset["Bridge Health Index (Overall)"].min(),
+            subset["Bridge Health Index (Overall)"].max(),
+            subset["deterioration_slope_per_year"].mean(),
+            subset["deterioration_slope_per_year"].median(),
+            subset["deterioration_slope_per_year"].min(),
+            subset["deterioration_slope_per_year"].max(),
+            subset["YEAR_BUILT_027"].mean(),
+            subset["ADT_029"].mean(),
+            subset["MAX_SPAN_LEN_MT_048"].mean(),
+            subset["STRUCTURE_LEN_MT_049"].mean(),
+            subset["DECK_WIDTH_MT_052"].mean(),
+        ]
+    })
+
+    worst_bridges = subset.sort_values("deterioration_slope_per_year", ascending=True).head(5)[[
+        "STRUCTURE_NUMBER_008",
+        "Bridge Health Index (Overall)",
+        "deterioration_slope_per_year",
+        "ADT_029",
+        "YEAR_BUILT_027"
+    ]].copy()
+
+    text = (
+        f"Here is a deeper analysis of cluster {cluster_id}.\n\n"
+        f"This goes beyond the basic summary and includes:\n"
+        f"- distribution of BHI and slopes\n"
+        f"- best and worst deterioration behavior\n"
+        f"- age, traffic, and geometry patterns\n"
+        f"- the 5 fastest deteriorating bridges in the cluster"
+    )
+
+    return {
+        "text": text,
+        "summary_df": result_df,
+        "analysis_df": worst_bridges,
+        "cluster_ids": [cluster_id],
+        "label": "cluster_deep_dive"
+    }
+
+
 # ---------------------------
 # Plotting
 # ---------------------------
@@ -1889,6 +2109,35 @@ def route_question(question: str):
             }
         }
 
+    if len(cluster_ids_local) == 1 and any(p in q for p in [
+        "interesting analysis",
+        "deeper analysis",
+        "what else can you do",
+        "tell me more"
+    ]):
+        return {
+            "mode": "direct_tool",
+            "tool_name": "cluster_deep_dive",
+            "tool_input": {"cluster_id": cluster_ids_local[0]}
+        }
+
+    if (
+        len(cluster_ids_local) == 1 and
+        any(phrase in q for phrase in [
+            "list of bridges",
+            "list the bridges",
+            "which bridges are in",
+            "bridges in cluster",
+            "show bridges in cluster",
+            "give me the bridges in cluster"
+        ])
+    ):
+        return {
+            "mode": "direct_tool",
+            "tool_name": "bridges_in_cluster",
+            "tool_input": {"cluster_id": cluster_ids_local[0]}
+        }
+
     if any(phrase in q for phrase in [
         "show dataset",
         "inspect dataset",
@@ -2011,6 +2260,36 @@ def get_tool_config():
                             "properties": {
                                 "cluster_id": {"type": "integer"},
                                 "top_n": {"type": "integer"}
+                            },
+                            "required": ["cluster_id"]
+                        }
+                    }
+                }
+            },
+            {
+                "toolSpec": {
+                    "name": "cluster_deep_dive",
+                    "description": "Run a deeper analysis for one cluster, including distributions, deterioration extremes, and representative bridges.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "cluster_id": {"type": "integer"}
+                            },
+                            "required": ["cluster_id"]
+                        }
+                    }
+                }
+            },
+            {
+                "toolSpec": {
+                    "name": "bridges_in_cluster",
+                    "description": "Return the list of bridge IDs that belong to a specific cluster.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "cluster_id": {"type": "integer"}
                             },
                             "required": ["cluster_id"]
                         }
@@ -2190,6 +2469,8 @@ def execute_tool(tool_name, tool_input):
         return {
             "text": get_cluster_summary(cluster_id),
             "cluster_id": cluster_id,
+            "cluster_ids": [cluster_id],
+            "label": "cluster_summary",
             "show_cluster_chart": True
         }
 
@@ -2206,7 +2487,18 @@ def execute_tool(tool_name, tool_input):
     if tool_name == "cluster_pca_drivers":
         cluster_id = int(tool_input["cluster_id"])
         top_n = int(tool_input.get("top_n", 8))
-        return get_cluster_pca_drivers(cluster_id, top_n=top_n)
+        result = get_cluster_pca_drivers(cluster_id, top_n=top_n)
+        result["cluster_ids"] = [cluster_id]
+        result["label"] = "cluster_pca_drivers"
+        return result
+
+    if tool_name == "cluster_deep_dive":
+        cluster_id = int(tool_input["cluster_id"])
+        return get_cluster_deep_dive(cluster_id)
+
+    if tool_name == "bridges_in_cluster":
+        cluster_id = int(tool_input["cluster_id"])
+        return get_bridges_in_cluster(cluster_id)
 
     if tool_name == "top_deteriorating_bridges":
         top_n = int(tool_input.get("top_n", 5))
@@ -2272,6 +2564,7 @@ def ask_bedrock_with_tools(user_prompt):
     pending_execution_steps = None
     pending_stdout = None
     pending_bridge_ids = None
+    pending_cluster_ids = None
     pending_label = None
 
     loops = 0
@@ -2301,6 +2594,7 @@ def ask_bedrock_with_tools(user_prompt):
             "execution_steps": None,
             "stdout": None,
             "bridge_ids": None,
+            "cluster_ids": None,
             "label": None
         }
     except Exception as e:
@@ -2320,6 +2614,7 @@ def ask_bedrock_with_tools(user_prompt):
             "execution_steps": None,
             "stdout": None,
             "bridge_ids": None,
+            "cluster_ids": None,
             "label": None
         }
 
@@ -2365,6 +2660,7 @@ def ask_bedrock_with_tools(user_prompt):
                 "execution_steps": pending_execution_steps,
                 "stdout": pending_stdout,
                 "bridge_ids": pending_bridge_ids,
+                "cluster_ids": pending_cluster_ids,
                 "label": pending_label
             }
 
@@ -2420,6 +2716,9 @@ def ask_bedrock_with_tools(user_prompt):
 
                 if "bridge_ids" in result:
                     pending_bridge_ids = result["bridge_ids"]
+
+                if "cluster_ids" in result:
+                    pending_cluster_ids = result["cluster_ids"]
 
                 if "label" in result:
                     pending_label = result["label"]
@@ -2508,6 +2807,7 @@ def ask_bedrock_with_tools(user_prompt):
                     "execution_steps": pending_execution_steps,
                     "stdout": pending_stdout,
                     "bridge_ids": pending_bridge_ids,
+                    "cluster_ids": pending_cluster_ids,
                     "label": pending_label
                 }
             except Exception as e:
@@ -2527,6 +2827,7 @@ def ask_bedrock_with_tools(user_prompt):
                     "execution_steps": pending_execution_steps,
                     "stdout": pending_stdout,
                     "bridge_ids": pending_bridge_ids,
+                    "cluster_ids": pending_cluster_ids,
                     "label": pending_label
                 }
 
@@ -2548,6 +2849,7 @@ def ask_bedrock_with_tools(user_prompt):
             "execution_steps": pending_execution_steps,
             "stdout": pending_stdout,
             "bridge_ids": pending_bridge_ids,
+            "cluster_ids": pending_cluster_ids,
             "label": pending_label
         }
 
@@ -2595,8 +2897,106 @@ def answer_question(question):
                 "execution_steps": subset_result.get("execution_steps"),
                 "stdout": subset_result.get("stdout"),
                 "bridge_ids": subset_result.get("bridge_ids"),
+                "cluster_ids": subset_result.get("cluster_ids"),
                 "label": subset_result.get("label")
             }
+
+    # 1b) Handle related follow-up to prior cluster
+    if has_cluster_context() and is_cluster_followup(question):
+        prior_cluster_ids = st.session_state.last_result_context.get("cluster_ids")
+        cluster_id = prior_cluster_ids[0]
+
+        intent = resolve_cluster_followup_intent(question)
+
+        if intent == "cluster_pca":
+            result = execute_tool("cluster_pca_drivers", {"cluster_id": cluster_id, "top_n": 8})
+            fig = None
+            return {
+                "text": result.get("text"),
+                "figure": fig,
+                "summary_df": result.get("summary_df"),
+                "cluster_df": result.get("cluster_df"),
+                "pc1_table": result.get("pc1_table"),
+                "schema_df": result.get("schema_df"),
+                "column_df": result.get("column_df"),
+                "values_df": result.get("values_df"),
+                "preview_df": result.get("preview_df"),
+                "browse_df": result.get("browse_df"),
+                "analysis_df": result.get("analysis_df"),
+                "generated_code": result.get("generated_code"),
+                "execution_steps": result.get("execution_steps"),
+                "stdout": result.get("stdout"),
+                "bridge_ids": result.get("bridge_ids"),
+                "cluster_ids": result.get("cluster_ids"),
+                "label": result.get("label")
+            }
+
+        if intent == "cluster_trend":
+            result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
+            fig = make_cluster_median_figure(cluster_id)
+            return {
+                "text": result.get("text"),
+                "figure": fig,
+                "summary_df": result.get("summary_df"),
+                "cluster_df": result.get("cluster_df"),
+                "pc1_table": result.get("pc1_table"),
+                "schema_df": result.get("schema_df"),
+                "column_df": result.get("column_df"),
+                "values_df": result.get("values_df"),
+                "preview_df": result.get("preview_df"),
+                "browse_df": result.get("browse_df"),
+                "analysis_df": result.get("analysis_df"),
+                "generated_code": result.get("generated_code"),
+                "execution_steps": result.get("execution_steps"),
+                "stdout": result.get("stdout"),
+                "bridge_ids": result.get("bridge_ids"),
+                "cluster_ids": result.get("cluster_ids"),
+                "label": result.get("label")
+            }
+
+        if intent == "cluster_summary":
+            result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
+            fig = make_cluster_median_figure(cluster_id)
+            return {
+                "text": result.get("text"),
+                "figure": fig,
+                "summary_df": result.get("summary_df"),
+                "cluster_df": result.get("cluster_df"),
+                "pc1_table": result.get("pc1_table"),
+                "schema_df": result.get("schema_df"),
+                "column_df": result.get("column_df"),
+                "values_df": result.get("values_df"),
+                "preview_df": result.get("preview_df"),
+                "browse_df": result.get("browse_df"),
+                "analysis_df": result.get("analysis_df"),
+                "generated_code": result.get("generated_code"),
+                "execution_steps": result.get("execution_steps"),
+                "stdout": result.get("stdout"),
+                "bridge_ids": result.get("bridge_ids"),
+                "cluster_ids": result.get("cluster_ids"),
+                "label": result.get("label")
+            }
+
+        result = execute_tool("cluster_deep_dive", {"cluster_id": cluster_id})
+        return {
+            "text": result.get("text"),
+            "figure": None,
+            "summary_df": result.get("summary_df"),
+            "cluster_df": result.get("cluster_df"),
+            "pc1_table": result.get("pc1_table"),
+            "schema_df": result.get("schema_df"),
+            "column_df": result.get("column_df"),
+            "values_df": result.get("values_df"),
+            "preview_df": result.get("preview_df"),
+            "browse_df": result.get("browse_df"),
+            "analysis_df": result.get("analysis_df"),
+            "generated_code": result.get("generated_code"),
+            "execution_steps": result.get("execution_steps"),
+            "stdout": result.get("stdout"),
+            "bridge_ids": result.get("bridge_ids"),
+            "cluster_ids": result.get("cluster_ids"),
+            "label": result.get("label")
+        }
 
     # 2) Existing cluster pending compare
     pending_base = st.session_state.pending_compare_cluster
@@ -2632,6 +3032,7 @@ def answer_question(question):
             "execution_steps": result.get("execution_steps"),
             "stdout": result.get("stdout"),
             "bridge_ids": result.get("bridge_ids"),
+            "cluster_ids": result.get("cluster_ids"),
             "label": result.get("label")
         }
 
@@ -2656,6 +3057,7 @@ def answer_question(question):
             "execution_steps": None,
             "stdout": None,
             "bridge_ids": None,
+            "cluster_ids": None,
             "label": None
         }
 
@@ -2685,6 +3087,7 @@ def answer_question(question):
             "execution_steps": result.get("execution_steps"),
             "stdout": result.get("stdout"),
             "bridge_ids": result.get("bridge_ids"),
+            "cluster_ids": result.get("cluster_ids"),
             "label": result.get("label")
         }
 
@@ -2886,6 +3289,9 @@ if user_prompt:
 
     if result.get("bridge_ids") is not None:
         assistant_message["bridge_ids"] = result["bridge_ids"]
+
+    if result.get("cluster_ids") is not None:
+        assistant_message["cluster_ids"] = result["cluster_ids"]
 
     if result.get("label") is not None:
         assistant_message["label"] = result["label"]
