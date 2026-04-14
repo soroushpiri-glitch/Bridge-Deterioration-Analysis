@@ -3329,3 +3329,94 @@ def answer_question(question):
         "stdout": result.get("stdout"), "bridge_ids": result.get("bridge_ids"), "label": result.get("label")
     }
 
+# ---------------------------
+# Sidebar
+# ---------------------------
+with st.sidebar:
+    st.subheader("Dataset")
+    st.write(f"This dataset contains {pivot_df.shape[0]:,} bridges.")
+    st.write(f"Years: {min(years_available)}–{max(years_available)}")
+    st.write("Use a bridge ID from STRUCTURE_NUMBER_008")
+    st.write("")
+    st.write("Example questions:")
+    st.write("Give me an overview of the bridge deterioration dataset")
+    st.write("Show trend for bridge 200000HO0109010")
+    st.write("Compare bridge 200000HO0109010 and 200000A-0094010")
+    st.write("Summarize cluster 2")
+    st.write("Compare cluster 2 and cluster 3")
+    st.write("Interpret cluster 2 graph")
+    st.write("Compare the graphs of cluster 2 and cluster 3")
+    st.write("What features characterize cluster 5?")
+    st.write("What columns are in the dataset?")
+    st.write("Show me the first 10 rows of the dataset")
+    st.write("Browse dataset rows")
+    st.write("Show the fastest deteriorating bridges")
+    st.write("Show the 5 worst bridges in 2020")
+    st.write("Show the 5 best bridges in 2020")
+    st.write("Give me the profile for bridge 200000CE0075010")
+
+# ---------------------------
+# Render prior messages
+# ---------------------------
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# ---------------------------
+# Chat input
+# ---------------------------
+user_input = st.chat_input("Ask a question about the bridge dataset...")
+
+if user_input:
+    st.session_state.messages.append({"role": "user", "content": user_input})
+
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Analyzing..."):
+            response = answer_question(user_input)
+
+            response_text = response.get("text", "I couldn’t generate a response.")
+            st.markdown(response_text)
+
+            if response.get("figure") is not None:
+                st.pyplot(response["figure"])
+
+            if response.get("summary_df") is not None:
+                st.subheader("Dataset Summary")
+                st.dataframe(response["summary_df"], use_container_width=True)
+
+            if response.get("cluster_df") is not None:
+                st.subheader("Cluster Distribution")
+                st.dataframe(response["cluster_df"], use_container_width=True)
+
+            if response.get("pc1_table") is not None:
+                st.subheader("PC1 Loadings")
+                st.dataframe(response["pc1_table"], use_container_width=True)
+
+            if response.get("schema_df") is not None:
+                st.subheader("Dataset Schema")
+                st.dataframe(response["schema_df"], use_container_width=True)
+
+            if response.get("column_df") is not None:
+                st.subheader("Column Summary")
+                st.dataframe(response["column_df"], use_container_width=True)
+
+            if response.get("values_df") is not None:
+                st.subheader("Sample Values")
+                st.dataframe(response["values_df"], use_container_width=True)
+
+            if response.get("preview_df") is not None:
+                st.subheader("Dataset Preview")
+                st.dataframe(response["preview_df"], use_container_width=True)
+
+            if response.get("browse_df") is not None:
+                st.subheader("Dataset Rows")
+                render_paginated_dataframe(response["browse_df"], key_prefix="browse_result", title="Dataset Rows")
+
+            if response.get("analysis_df") is not None:
+                st.subheader("Analysis Results")
+                st.dataframe(response["analysis_df"], use_container_width=True)
+
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
