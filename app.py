@@ -348,9 +348,21 @@ def extract_single_cluster_id(text: str):
 def extract_compare_target(text: str):
     text = text.lower().strip()
 
-    m = re.search(r"(?:compare\s+(?:to|with)\s+)?cluster\s+(\d+)", text)
-    if m:
-        return int(m.group(1))
+    # Only treat the message as a pending-comparison reply when the user
+    # explicitly provides a comparison target, not when they merely mention
+    # a cluster in a new standalone request like "interpret cluster 0 graph".
+    patterns = [
+        r"(?:compare\s+(?:to|with)\s+cluster\s*)(\d+)",
+        r"(?:vs\.?\s*cluster\s*)(\d+)",
+        r"(?:versus\s+cluster\s*)(\d+)",
+        r"(?:with\s+cluster\s*)(\d+)",
+        r"(?:to\s+cluster\s*)(\d+)"
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if m:
+            return int(m.group(1))
 
     m = re.fullmatch(r"\s*(\d+)\s*", text)
     if m:
@@ -579,6 +591,33 @@ def resolve_cluster_followup_intent(question: str):
     q = question.lower().strip()
 
     if any(p in q for p in [
+        "how do i read this graph",
+        "how to read this graph",
+        "what does this graph mean",
+        "interpret this graph",
+        "analyze this graph",
+        "what does this cluster graph show",
+        "why is this cluster unusual",
+        "why does this cluster behave like this",
+        "explain this pattern",
+        "interpret this cluster",
+        "read this cluster graph",
+        "interpret the graph"
+    ]):
+        return "cluster_graph_interpretation"
+
+    if any(p in q for p in [
+        "compare the graphs",
+        "compare these clusters analytically",
+        "how are these cluster graphs different",
+        "which cluster is more stable",
+        "why are these clusters different",
+        "interpret the comparison",
+        "analyze the comparison"
+    ]):
+        return "cluster_comparison_interpretation"
+
+    if any(p in q for p in [
         "interesting analysis",
         "deeper analysis",
         "what else can you do",
@@ -609,7 +648,9 @@ def resolve_cluster_followup_intent(question: str):
 
     if any(p in q for p in [
         "summary",
-        "summarize"
+        "summarize",
+        "how is cluster",
+        "what is cluster"
     ]):
         return "cluster_summary"
 
@@ -3326,7 +3367,12 @@ def answer_question(question):
     pending_base = st.session_state.pending_compare_cluster
     followup_target = extract_compare_target(question)
 
-    if pending_base is not None and followup_target is not None:
+    if (
+        pending_base is not None and
+        followup_target is not None and
+        followup_target != pending_base and
+        not (len(extract_cluster_ids(question)) >= 2 and any(x in question.lower() for x in ["compare", "vs", "versus", "different"]))
+    ):
         result = execute_tool(
             "compare_clusters",
             {
