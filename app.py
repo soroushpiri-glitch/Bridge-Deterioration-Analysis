@@ -1631,51 +1631,7 @@ def get_cluster_pca_drivers(cluster_id, top_n=8):
         "explained_variance_ratio_pc1": explained_var
     }
 
-def interpret_cluster_trend(cluster_id):
-    try:
-        cluster_id = int(cluster_id)
-    except:
-        return {"text": "Invalid cluster id."}
 
-    subset = pivot_df.copy()
-    clustered_subset = clustered_df[clustered_df["Cluster"] == cluster_id]
-
-    if clustered_subset.empty:
-        return {"text": f"No data for cluster {cluster_id}."}
-
-    bridge_ids_local = clustered_subset.index.tolist()
-    cluster_ts = subset.loc[bridge_ids_local]
-
-    # Compute median line
-    median_trend = cluster_ts.median(axis=0)
-
-    # Compute spread (IQR)
-    q1 = cluster_ts.quantile(0.25, axis=0)
-    q3 = cluster_ts.quantile(0.75, axis=0)
-
-    # slope of median
-    x = np.array(median_trend.index, dtype=float)
-    y = median_trend.values.astype(float)
-
-    slope, _, _, _, _ = linregress(x, y)
-
-    direction = "declining" if slope < 0 else "improving" if slope > 0 else "stable"
-
-    text = (
-        f"The median BHI line represents the typical (central) deterioration behavior of bridges in Cluster {cluster_id}.\n\n"
-        f"Each point on this line is the median BHI across all bridges in that cluster at a given year.\n\n"
-        f"In this cluster, the median trend is {direction} over time with a slope of {slope:.3f} BHI points per year.\n\n"
-        f"This means that, overall, a typical bridge in this cluster is {'losing condition' if slope < 0 else 'improving'} gradually over time.\n\n"
-        f"The shaded region (if shown) represents variability (IQR), meaning how spread out individual bridges are around the median.\n\n"
-        f"If the band is wide → bridges behave very differently.\n"
-        f"If narrow → bridges behave consistently."
-    )
-
-    return {
-        "text": text,
-        "median_trend": median_trend.reset_index()
-    }
-    
 def get_top_deteriorating_bridges(top_n=5):
     subset = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
     subset = subset.sort_values("deterioration_slope_per_year", ascending=True).head(top_n)
@@ -2164,10 +2120,7 @@ def route_question(question: str):
             "tool_name": "cluster_deep_dive",
             "tool_input": {"cluster_id": cluster_ids_local[0]}
         }
-if "median bhi" in q or "median line" in q or "interpret the median" in q:
-    cluster_id = extract_single_cluster_id(question)
-    if cluster_id is not None:
-        return interpret_cluster_trend(cluster_id)
+
     if (
         len(cluster_ids_local) == 1 and
         any(phrase in q for phrase in [
