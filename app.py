@@ -348,21 +348,9 @@ def extract_single_cluster_id(text: str):
 def extract_compare_target(text: str):
     text = text.lower().strip()
 
-    # Only treat the message as a pending-comparison reply when the user
-    # explicitly provides a comparison target, not when they merely mention
-    # a cluster in a new standalone request like "interpret cluster 0 graph".
-    patterns = [
-        r"(?:compare\s+(?:to|with)\s+cluster\s*)(\d+)",
-        r"(?:vs\.?\s*cluster\s*)(\d+)",
-        r"(?:versus\s+cluster\s*)(\d+)",
-        r"(?:with\s+cluster\s*)(\d+)",
-        r"(?:to\s+cluster\s*)(\d+)"
-    ]
-
-    for pattern in patterns:
-        m = re.search(pattern, text)
-        if m:
-            return int(m.group(1))
+    m = re.search(r"(?:compare\s+(?:to|with)\s+)?cluster\s+(\d+)", text)
+    if m:
+        return int(m.group(1))
 
     m = re.fullmatch(r"\s*(\d+)\s*", text)
     if m:
@@ -591,33 +579,6 @@ def resolve_cluster_followup_intent(question: str):
     q = question.lower().strip()
 
     if any(p in q for p in [
-        "how do i read this graph",
-        "how to read this graph",
-        "what does this graph mean",
-        "interpret this graph",
-        "analyze this graph",
-        "what does this cluster graph show",
-        "why is this cluster unusual",
-        "why does this cluster behave like this",
-        "explain this pattern",
-        "interpret this cluster",
-        "read this cluster graph",
-        "interpret the graph"
-    ]):
-        return "cluster_graph_interpretation"
-
-    if any(p in q for p in [
-        "compare the graphs",
-        "compare these clusters analytically",
-        "how are these cluster graphs different",
-        "which cluster is more stable",
-        "why are these clusters different",
-        "interpret the comparison",
-        "analyze the comparison"
-    ]):
-        return "cluster_comparison_interpretation"
-
-    if any(p in q for p in [
         "interesting analysis",
         "deeper analysis",
         "what else can you do",
@@ -648,9 +609,7 @@ def resolve_cluster_followup_intent(question: str):
 
     if any(p in q for p in [
         "summary",
-        "summarize",
-        "how is cluster",
-        "what is cluster"
+        "summarize"
     ]):
         return "cluster_summary"
 
@@ -1880,209 +1839,6 @@ def get_cluster_deep_dive(cluster_id):
     }
 
 
-
-
-def extract_cluster_graph_features(cluster_id):
-    try:
-        cluster_id = int(cluster_id)
-    except Exception:
-        return None
-
-    subset = clustered_df[clustered_df["Cluster"] == cluster_id].drop(columns="Cluster", errors="ignore")
-    if subset.empty:
-        return None
-
-    years = np.array(subset.columns.tolist(), dtype=float)
-    median_trend = subset.median(axis=0).astype(float)
-    q25 = subset.quantile(0.25, axis=0).astype(float)
-    q75 = subset.quantile(0.75, axis=0).astype(float)
-
-    x = years
-    y = median_trend.values
-
-    if len(x) >= 2:
-        slope, intercept, r_value, p_value, std_err = linregress(x, y)
-    else:
-        slope = np.nan
-
-    net_change = float(y[-1] - y[0]) if len(y) >= 2 else np.nan
-    peak_year = int(x[np.argmax(y)]) if len(y) > 0 else None
-    trough_year = int(x[np.argmin(y)]) if len(y) > 0 else None
-    max_spread = float((q75 - q25).max()) if len(q75) > 0 else np.nan
-    mean_spread = float((q75 - q25).mean()) if len(q75) > 0 else np.nan
-
-    diffs = np.diff(y)
-    turning_points = int(np.sum(np.sign(diffs[:-1]) != np.sign(diffs[1:]))) if len(diffs) >= 2 else 0
-
-    rebound = False
-    if len(y) >= 5:
-        rebound = bool((np.min(y[:-2]) < y[-1]) and (y[-1] > y[-3]))
-
-    largest_drop = float(np.min(diffs)) if len(diffs) > 0 else np.nan
-    largest_gain = float(np.max(diffs)) if len(diffs) > 0 else np.nan
-
-    below_50_share = float((subset.lt(50).sum().sum()) / subset.size) if subset.size > 0 else np.nan
-    below_30_share = float((subset.lt(30).sum().sum()) / subset.size) if subset.size > 0 else np.nan
-
-    return {
-        "cluster_id": cluster_id,
-        "bridge_count": int(len(subset)),
-        "start_year": int(x[0]),
-        "end_year": int(x[-1]),
-        "start_bhi": float(y[0]),
-        "end_bhi": float(y[-1]),
-        "median_slope": float(slope) if pd.notna(slope) else None,
-        "net_change": net_change,
-        "peak_year": peak_year,
-        "trough_year": trough_year,
-        "max_variability_iqr": max_spread,
-        "mean_variability_iqr": mean_spread,
-        "turning_points": turning_points,
-        "rebound_detected": rebound,
-        "largest_year_to_year_drop": largest_drop,
-        "largest_year_to_year_gain": largest_gain,
-        "share_below_bhi_50": below_50_share,
-        "share_below_bhi_30": below_30_share,
-    }
-
-
-def generate_cluster_interpretation_paragraph(feature_dict):
-    if not feature_dict:
-        return "I couldn’t extract enough graph features for interpretation."
-
-    prompt = f"""
-You are a bridge deterioration analyst.
-
-Write one analytical paragraph explaining how to read this cluster graph and what it suggests.
-Use only the structured facts below.
-Do not invent causes.
-You may use cautious phrases like 'this may suggest' or 'one possible explanation is'.
-Mention unusual behavior if present.
-
-Structured facts:
-{feature_dict}
-
-Requirements:
-- one paragraph
-- clear and professional
-- explain trend direction
-- explain stability or variability
-- mention unusual behavior such as rebound or turning points
-- mention what a reader should notice in the graph
-"""
-
-    try:
-        response = bedrock.converse(
-            modelId=BEDROCK_MODEL_ID,
-            system=[{"text": "Return only the final paragraph. No bullet points."}],
-            messages=[{"role": "user", "content": [{"text": prompt}]}]
-        )
-        output_message = response["output"]["message"]
-        text = extract_text_from_content_blocks(output_message["content"]).strip()
-        return strip_thinking_blocks(text)
-    except Exception as e:
-        return f"Interpretation generation failed: {e}"
-
-
-def interpret_cluster_graph(cluster_id):
-    cluster_id = int(cluster_id)
-    features = extract_cluster_graph_features(cluster_id)
-    if not features:
-        return {"text": f"No graph interpretation could be generated for cluster {cluster_id}."}
-
-    paragraph = generate_cluster_interpretation_paragraph(features)
-
-    return {
-        "text": paragraph,
-        "cluster_id": cluster_id,
-        "cluster_ids": [cluster_id],
-        "analysis_df": pd.DataFrame([features]),
-        "label": f"cluster_graph_interpretation_{cluster_id}",
-        "show_cluster_chart": True
-    }
-
-
-def extract_cluster_comparison_features(cluster_id_1, cluster_id_2):
-    f1 = extract_cluster_graph_features(cluster_id_1)
-    f2 = extract_cluster_graph_features(cluster_id_2)
-
-    if not f1 or not f2:
-        return None
-
-    slope_1 = f1.get("median_slope")
-    slope_2 = f2.get("median_slope")
-
-    return {
-        "cluster_1": f1,
-        "cluster_2": f2,
-        "difference_in_end_bhi": f1["end_bhi"] - f2["end_bhi"],
-        "difference_in_slope": (
-            (slope_1 - slope_2) if slope_1 is not None and slope_2 is not None else None
-        ),
-        "difference_in_variability": f1["mean_variability_iqr"] - f2["mean_variability_iqr"]
-    }
-
-
-def generate_cluster_comparison_paragraph(comparison_dict):
-    if not comparison_dict:
-        return "I couldn’t extract enough information for cluster comparison interpretation."
-
-    prompt = f"""
-You are a bridge deterioration analyst.
-
-Write one analytical paragraph comparing two cluster graphs using only the structured facts below.
-Explain:
-- which cluster is more stable
-- which one deteriorates faster or performs better
-- how to read the difference visually
-- possible cautious explanations for unusual behavior
-Do not invent unsupported claims.
-
-Structured facts:
-{comparison_dict}
-
-Return only one paragraph.
-"""
-    try:
-        response = bedrock.converse(
-            modelId=BEDROCK_MODEL_ID,
-            system=[{"text": "Return only the final paragraph. No bullet points."}],
-            messages=[{"role": "user", "content": [{"text": prompt}]}]
-        )
-        output_message = response["output"]["message"]
-        text = extract_text_from_content_blocks(output_message["content"]).strip()
-        return strip_thinking_blocks(text)
-    except Exception as e:
-        return f"Comparison interpretation generation failed: {e}"
-
-
-def interpret_cluster_comparison(cluster_id_1, cluster_id_2):
-    cluster_id_1 = int(cluster_id_1)
-    cluster_id_2 = int(cluster_id_2)
-    features = extract_cluster_comparison_features(cluster_id_1, cluster_id_2)
-    if not features:
-        return {"text": "I couldn’t extract enough information for cluster comparison interpretation."}
-
-    paragraph = generate_cluster_comparison_paragraph(features)
-
-    return {
-        "text": paragraph,
-        "cluster_id_1": cluster_id_1,
-        "cluster_id_2": cluster_id_2,
-        "cluster_ids": [cluster_id_1, cluster_id_2],
-        "analysis_df": pd.DataFrame([
-            {
-                "Cluster 1": cluster_id_1,
-                "Cluster 2": cluster_id_2,
-                "End BHI Difference": features["difference_in_end_bhi"],
-                "Slope Difference": features["difference_in_slope"],
-                "Variability Difference": features["difference_in_variability"]
-            }
-        ]),
-        "label": f"cluster_comparison_interpretation_{cluster_id_1}_{cluster_id_2}",
-        "show_compare_clusters_chart": True
-    }
-
 # ---------------------------
 # Plotting
 # ---------------------------
@@ -2344,43 +2100,13 @@ def route_question(question: str):
         }
 
     if len(cluster_ids_local) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
-        tool_name = "compare_clusters"
-        if any(p in q for p in [
-            "compare the graphs",
-            "compare these clusters analytically",
-            "how are these cluster graphs different",
-            "which cluster is more stable",
-            "why are these clusters different",
-            "interpret the comparison",
-            "analyze the comparison"
-        ]):
-            tool_name = "cluster_comparison_interpretation"
         return {
             "mode": "direct_tool",
-            "tool_name": tool_name,
+            "tool_name": "compare_clusters",
             "tool_input": {
                 "cluster_id_1": cluster_ids_local[0],
                 "cluster_id_2": cluster_ids_local[1]
             }
-        }
-
-    if len(cluster_ids_local) == 1 and any(p in q for p in [
-        "how do i read this graph",
-        "how to read this graph",
-        "what does this graph mean",
-        "interpret this graph",
-        "analyze this graph",
-        "what does this cluster graph show",
-        "why is this cluster unusual",
-        "why does this cluster behave like this",
-        "explain this pattern",
-        "interpret this cluster",
-        "read this cluster graph"
-    ]):
-        return {
-            "mode": "direct_tool",
-            "tool_name": "cluster_graph_interpretation",
-            "tool_input": {"cluster_id": cluster_ids_local[0]}
         }
 
     if len(cluster_ids_local) == 1 and any(p in q for p in [
@@ -2681,37 +2407,6 @@ def get_tool_config():
             },
             {
                 "toolSpec": {
-                    "name": "cluster_graph_interpretation",
-                    "description": "Interpret one cluster trend graph analytically using extracted graph features and explain what the pattern suggests.",
-                    "inputSchema": {
-                        "json": {
-                            "type": "object",
-                            "properties": {
-                                "cluster_id": {"type": "integer"}
-                            },
-                            "required": ["cluster_id"]
-                        }
-                    }
-                }
-            },
-            {
-                "toolSpec": {
-                    "name": "cluster_comparison_interpretation",
-                    "description": "Interpret two cluster graphs analytically and explain which is more stable, which deteriorates faster, and what unusual differences stand out.",
-                    "inputSchema": {
-                        "json": {
-                            "type": "object",
-                            "properties": {
-                                "cluster_id_1": {"type": "integer"},
-                                "cluster_id_2": {"type": "integer"}
-                            },
-                            "required": ["cluster_id_1", "cluster_id_2"]
-                        }
-                    }
-                }
-            },
-            {
-                "toolSpec": {
                     "name": "python_analysis",
                     "description": "Generate and run restricted Python analysis on the loaded bridge dataframes when existing tools are insufficient.",
                     "inputSchema": {
@@ -2786,8 +2481,6 @@ def execute_tool(tool_name, tool_input):
             "text": compare_two_clusters(cluster_id_1, cluster_id_2),
             "cluster_id_1": cluster_id_1,
             "cluster_id_2": cluster_id_2,
-            "cluster_ids": [cluster_id_1, cluster_id_2],
-            "label": f"compare_clusters_{cluster_id_1}_{cluster_id_2}",
             "show_compare_clusters_chart": True
         }
 
@@ -2839,15 +2532,6 @@ def execute_tool(tool_name, tool_input):
         limit = int(tool_input.get("limit", 25))
         columns = tool_input.get("columns", None)
         return browse_dataset_rows(offset=offset, limit=limit, columns=columns)
-
-    if tool_name == "cluster_graph_interpretation":
-        cluster_id = int(tool_input["cluster_id"])
-        return interpret_cluster_graph(cluster_id)
-
-    if tool_name == "cluster_comparison_interpretation":
-        cluster_id_1 = int(tool_input["cluster_id_1"])
-        cluster_id_2 = int(tool_input["cluster_id_2"])
-        return interpret_cluster_comparison(cluster_id_1, cluster_id_2)
 
     if tool_name == "python_analysis":
         user_request = tool_input["user_request"]
@@ -3247,55 +2931,6 @@ def answer_question(question):
                 "label": result.get("label")
             }
 
-        if intent == "cluster_graph_interpretation":
-            result = execute_tool("cluster_graph_interpretation", {"cluster_id": cluster_id})
-            fig = make_cluster_median_figure(cluster_id)
-            return {
-                "text": result.get("text"),
-                "figure": fig,
-                "summary_df": result.get("summary_df"),
-                "cluster_df": result.get("cluster_df"),
-                "pc1_table": result.get("pc1_table"),
-                "schema_df": result.get("schema_df"),
-                "column_df": result.get("column_df"),
-                "values_df": result.get("values_df"),
-                "preview_df": result.get("preview_df"),
-                "browse_df": result.get("browse_df"),
-                "analysis_df": result.get("analysis_df"),
-                "generated_code": result.get("generated_code"),
-                "execution_steps": result.get("execution_steps"),
-                "stdout": result.get("stdout"),
-                "bridge_ids": result.get("bridge_ids"),
-                "cluster_ids": result.get("cluster_ids"),
-                "label": result.get("label")
-            }
-
-        if intent == "cluster_comparison_interpretation" and len(prior_cluster_ids) >= 2:
-            result = execute_tool(
-                "cluster_comparison_interpretation",
-                {"cluster_id_1": prior_cluster_ids[0], "cluster_id_2": prior_cluster_ids[1]}
-            )
-            fig = make_compare_clusters_figure(prior_cluster_ids[0], prior_cluster_ids[1])
-            return {
-                "text": result.get("text"),
-                "figure": fig,
-                "summary_df": result.get("summary_df"),
-                "cluster_df": result.get("cluster_df"),
-                "pc1_table": result.get("pc1_table"),
-                "schema_df": result.get("schema_df"),
-                "column_df": result.get("column_df"),
-                "values_df": result.get("values_df"),
-                "preview_df": result.get("preview_df"),
-                "browse_df": result.get("browse_df"),
-                "analysis_df": result.get("analysis_df"),
-                "generated_code": result.get("generated_code"),
-                "execution_steps": result.get("execution_steps"),
-                "stdout": result.get("stdout"),
-                "bridge_ids": result.get("bridge_ids"),
-                "cluster_ids": result.get("cluster_ids"),
-                "label": result.get("label")
-            }
-
         if intent == "cluster_trend":
             result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
             fig = make_cluster_median_figure(cluster_id)
@@ -3367,12 +3002,7 @@ def answer_question(question):
     pending_base = st.session_state.pending_compare_cluster
     followup_target = extract_compare_target(question)
 
-    if (
-        pending_base is not None and
-        followup_target is not None and
-        followup_target != pending_base and
-        not (len(extract_cluster_ids(question)) >= 2 and any(x in question.lower() for x in ["compare", "vs", "versus", "different"]))
-    ):
+    if pending_base is not None and followup_target is not None:
         result = execute_tool(
             "compare_clusters",
             {
@@ -3519,8 +3149,6 @@ with st.sidebar:
     - Compare bridge {example_1} and {example_2}
     - Summarize cluster 2
     - Compare cluster 2 and cluster 3
-    - Interpret cluster 2 graph
-    - Compare the graphs of cluster 2 and cluster 3
     - What features characterize cluster 5?
     - What columns are in the dataset?
     - Show me the first 10 rows of the dataset
