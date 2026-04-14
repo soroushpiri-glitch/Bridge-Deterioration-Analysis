@@ -560,6 +560,7 @@ def is_cluster_followup(question: str):
         "this cluster",
         "that cluster",
         "the cluster",
+        "it",
         "what else can you do",
         "what else can you analyze",
         "more analysis",
@@ -568,64 +569,14 @@ def is_cluster_followup(question: str):
         "analyze it further",
         "tell me more",
         "what else about it",
-        "what else for this cluster",
-        "how do i read this graph",
-        "how to read this graph",
-        "what does this graph mean",
-        "what does this graph show",
-        "explain this pattern",
-        "why is this unusual",
-        "tell me more about the unusual behavior",
-        "interpret the comparison",
-        "which one is more stable"
+        "what else for this cluster"
     ]
 
     return any(p in q for p in phrases)
 
+
 def resolve_cluster_followup_intent(question: str):
     q = question.lower().strip()
-
-    if any(p in q for p in [
-        "compare the graphs",
-        "compare these clusters analytically",
-        "how are these cluster graphs different",
-        "which cluster is more stable",
-        "which one is more stable",
-        "why are these clusters different",
-        "interpret the comparison",
-        "analyze the comparison"
-    ]):
-        return "cluster_comparison_interpretation"
-
-    if any(p in q for p in [
-        "how do i read this graph",
-        "how to read this graph",
-        "what does this graph mean",
-        "interpret this graph",
-        "analyze this graph",
-        "what does this cluster graph show",
-        "why is this cluster unusual",
-        "why does this cluster behave like this",
-        "explain this pattern",
-        "why is this unusual",
-        "tell me more about the unusual behavior"
-    ]):
-        return "cluster_graph_interpretation"
-
-    if any(p in q for p in [
-        "summary",
-        "summarize",
-        "give me summary",
-        "describe cluster",
-        "how is cluster",
-        "how are cluster",
-        "tell me about cluster",
-        "about this cluster",
-        "about cluster",
-        "cluster overview",
-        "overview of cluster"
-    ]):
-        return "cluster_summary"
 
     if any(p in q for p in [
         "interesting analysis",
@@ -642,7 +593,6 @@ def resolve_cluster_followup_intent(question: str):
         "key drivers",
         "important features",
         "what characterizes",
-        "what features characterize",
         "pca",
         "pc1",
         "loadings"
@@ -657,7 +607,14 @@ def resolve_cluster_followup_intent(question: str):
     ]):
         return "cluster_trend"
 
-    return "cluster_summary"
+    if any(p in q for p in [
+        "summary",
+        "summarize"
+    ]):
+        return "cluster_summary"
+
+    return "cluster_deep_dive"
+
 
 def resolve_followup_intent(question: str):
     q = question.lower().strip()
@@ -938,7 +895,7 @@ def update_last_result_context(question, result):
     if cluster_ids_local is not None:
         st.session_state.last_result_context = {
             "bridge_ids": None,
-            "cluster_ids": list(cluster_ids_local),
+            "cluster_ids": cluster_ids_local,
             "year": None,
             "label": label,
             "result_type": "cluster",
@@ -946,6 +903,9 @@ def update_last_result_context(question, result):
         }
         return
 
+# ---------------------------
+# Dataset inspection functions
+# ---------------------------
 def get_dataset_schema(max_sample_values=5):
     df = static_df.copy()
 
@@ -1401,19 +1361,16 @@ def compare_two_bridges(bridge_id_1, bridge_id_2):
     row1 = row1.iloc[0]
     row2 = row2.iloc[0]
 
-    slope1 = row1["deterioration_slope_per_year"]
-    slope2 = row2["deterioration_slope_per_year"]
-    direction1 = "improving" if pd.notna(slope1) and slope1 > 0 else "deteriorating" if pd.notna(slope1) and slope1 < 0 else "stable"
-    direction2 = "improving" if pd.notna(slope2) and slope2 > 0 else "deteriorating" if pd.notna(slope2) and slope2 < 0 else "stable"
-
     return (
         f"Bridge {matched1} is in Cluster {int(row1['Cluster'])} with latest overall BHI "
         f"{row1['Bridge Health Index (Overall)']:.2f} and deterioration slope "
-        f"{slope1:.3f} per year ({direction1}).\n\n"
+        f"{row1['deterioration_slope_per_year']:.3f} per year.\n\n"
         f"Bridge {matched2} is in Cluster {int(row2['Cluster'])} with latest overall BHI "
         f"{row2['Bridge Health Index (Overall)']:.2f} and deterioration slope "
-        f"{slope2:.3f} per year ({direction2})."
+        f"{row2['deterioration_slope_per_year']:.3f} per year."
     )
+
+
 def get_cluster_summary(cluster_id):
     try:
         cluster_id = int(cluster_id)
@@ -1474,9 +1431,6 @@ def compare_two_clusters(cluster_id_1, cluster_id_2):
     except Exception:
         return "Invalid cluster ids."
 
-    if cluster_id_1 == cluster_id_2:
-        return get_cluster_summary(cluster_id_1)
-
     subset1 = bridge_summary[bridge_summary["Cluster"] == cluster_id_1].copy()
     subset2 = bridge_summary[bridge_summary["Cluster"] == cluster_id_2].copy()
 
@@ -1532,15 +1486,16 @@ def compare_two_clusters(cluster_id_1, cluster_id_2):
     }
 
     interpretation = []
+
     if metrics1["avg_latest_overall_bhi"] > metrics2["avg_latest_overall_bhi"]:
         interpretation.append(f"Cluster {cluster_id_1} has the higher average latest overall BHI.")
     else:
         interpretation.append(f"Cluster {cluster_id_2} has the higher average latest overall BHI.")
 
     if metrics1["avg_slope"] > metrics2["avg_slope"]:
-        interpretation.append(f"Cluster {cluster_id_1} shows the more positive average slope.")
+        interpretation.append(f"Cluster {cluster_id_1} shows the stronger positive average deterioration slope.")
     else:
-        interpretation.append(f"Cluster {cluster_id_2} shows the more positive average slope.")
+        interpretation.append(f"Cluster {cluster_id_2} shows the stronger positive average deterioration slope.")
 
     if metrics1["avg_adt"] > metrics2["avg_adt"]:
         interpretation.append(f"Cluster {cluster_id_1} carries higher average daily traffic.")
@@ -1578,6 +1533,8 @@ def compare_two_clusters(cluster_id_1, cluster_id_2):
     )
 
     return text
+
+
 def get_cluster_pca_drivers(cluster_id, top_n=8):
     try:
         cluster_id = int(cluster_id)
@@ -2037,9 +1994,8 @@ Explain:
 - which cluster is more stable
 - which one deteriorates faster or performs better
 - how to read the difference visually
+- possible cautious explanations for unusual behavior
 Do not invent unsupported claims.
-Do not speculate about funding, environment, policy, maintenance, or other causes unless they are explicitly present in the structured facts.
-If the cause is unknown, say the graph shows the pattern but not its cause.
 
 Structured facts:
 {comparison_dict}
@@ -2300,12 +2256,9 @@ def extract_cluster_ids(text):
     return [int(x) for x in matches]
 
 
-def question_has_explicit_cluster_ids(question: str):
-    return len(extract_cluster_ids(question)) > 0
-
 def route_question(question: str):
     q = question.lower().strip()
-    cluster_ids_local = list(dict.fromkeys(extract_cluster_ids(q)))
+    cluster_ids_local = extract_cluster_ids(q)
 
     if (
         len(cluster_ids_local) == 1 and
@@ -2325,20 +2278,40 @@ def route_question(question: str):
             "tool_input": {"cluster_id": cluster_ids_local[0], "top_n": 8}
         }
 
-    if len(cluster_ids_local) >= 2 and any(x in q for x in [
-        "compare", "vs", "versus", "different", "more stable", "interpret the comparison", "analytically", "which one is more stable", "which cluster is more stable", "why are", "how are"
-    ]):
+    if (
+        len(cluster_ids_local) == 1 and
+        any(phrase in q for phrase in [
+            "why is cluster",
+            "how is cluster",
+            "why cluster"
+        ]) and
+        "compare" not in q and
+        "vs" not in q and
+        "versus" not in q
+    ):
+        return {
+            "mode": "direct_text",
+            "text": (
+                f"Your question is ambiguous. Cluster {cluster_ids_local[0]} is different compared to which cluster?\n"
+                f"You can ask:\n"
+                f"- Compare cluster {cluster_ids_local[0]} and cluster 1\n"
+                f"- Summarize cluster {cluster_ids_local[0]}\n"
+                f"- What features characterize cluster {cluster_ids_local[0]}?\n"
+                f"- Compare to cluster 2"
+            ),
+            "pending_compare_cluster": cluster_ids_local[0]
+        }
+
+    if len(cluster_ids_local) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
         tool_name = "compare_clusters"
         if any(p in q for p in [
             "compare the graphs",
             "compare these clusters analytically",
-            "how are",
+            "how are these cluster graphs different",
             "which cluster is more stable",
-            "which one is more stable",
-            "why are",
+            "why are these clusters different",
             "interpret the comparison",
-            "analyze the comparison",
-            "analytically"
+            "analyze the comparison"
         ]):
             tool_name = "cluster_comparison_interpretation"
         return {
@@ -2361,31 +2334,11 @@ def route_question(question: str):
         "why does this cluster behave like this",
         "explain this pattern",
         "interpret this cluster",
-        "read this cluster graph",
-        "why is cluster",
-        "why cluster",
-        "unusual"
+        "read this cluster graph"
     ]):
         return {
             "mode": "direct_tool",
             "tool_name": "cluster_graph_interpretation",
-            "tool_input": {"cluster_id": cluster_ids_local[0]}
-        }
-
-    if len(cluster_ids_local) == 1 and any(p in q for p in [
-        "summary",
-        "summarize",
-        "give me summary",
-        "describe cluster",
-        "how is cluster",
-        "how are cluster",
-        "tell me about cluster",
-        "cluster overview",
-        "overview of cluster"
-    ]):
-        return {
-            "mode": "direct_tool",
-            "tool_name": "cluster_summary",
             "tool_input": {"cluster_id": cluster_ids_local[0]}
         }
 
@@ -2436,6 +2389,7 @@ def route_question(question: str):
         }
 
     return {"mode": "bedrock"}
+
 
 def get_tool_config():
     return {
@@ -3197,9 +3151,8 @@ def ask_bedrock_with_tools(user_prompt):
 # Main answer router
 # ---------------------------
 def answer_question(question):
-    explicit_cluster_ids = list(dict.fromkeys(extract_cluster_ids(question)))
-
-    if not explicit_cluster_ids and has_bridge_context() and is_contextual_followup(question):
+    # 1) Handle general related follow-up to prior bridge subset
+    if has_bridge_context() and is_contextual_followup(question):
         prior_bridge_ids = st.session_state.last_result_context.get("bridge_ids")
         subset_result = analyze_bridge_subset(question, prior_bridge_ids)
         if subset_result is not None:
@@ -3223,92 +3176,251 @@ def answer_question(question):
                 "label": subset_result.get("label")
             }
 
-    routed = route_question(question)
-
-    if routed["mode"] == "direct_text":
-        st.session_state.pending_compare_cluster = routed.get("pending_compare_cluster")
-        return {
-            "text": routed["text"], "figure": None, "summary_df": None, "cluster_df": None,
-            "pc1_table": None, "schema_df": None, "column_df": None, "values_df": None,
-            "preview_df": None, "browse_df": None, "analysis_df": None, "generated_code": None,
-            "execution_steps": None, "stdout": None, "bridge_ids": None, "cluster_ids": None, "label": None
-        }
-
-    if routed["mode"] == "direct_tool":
-        st.session_state.pending_compare_cluster = None
-        result = execute_tool(routed["tool_name"], routed["tool_input"])
-        fig = None
-        if result.get("show_cluster_chart"):
-            fig = make_cluster_median_figure(result["cluster_id"])
-        elif result.get("show_compare_clusters_chart"):
-            fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
-        return {
-            "text": result.get("text"), "figure": fig, "summary_df": result.get("summary_df"),
-            "cluster_df": result.get("cluster_df"), "pc1_table": result.get("pc1_table"),
-            "schema_df": result.get("schema_df"), "column_df": result.get("column_df"),
-            "values_df": result.get("values_df"), "preview_df": result.get("preview_df"),
-            "browse_df": result.get("browse_df"), "analysis_df": result.get("analysis_df"),
-            "generated_code": result.get("generated_code"), "execution_steps": result.get("execution_steps"),
-            "stdout": result.get("stdout"), "bridge_ids": result.get("bridge_ids"),
-            "cluster_ids": result.get("cluster_ids"), "label": result.get("label")
-        }
-
-    if not explicit_cluster_ids and has_cluster_context() and is_cluster_followup(question):
+    # 1b) Handle related follow-up to prior cluster
+    if has_cluster_context() and is_cluster_followup(question):
         prior_cluster_ids = st.session_state.last_result_context.get("cluster_ids")
         cluster_id = prior_cluster_ids[0]
+
         intent = resolve_cluster_followup_intent(question)
 
         if intent == "cluster_pca":
             result = execute_tool("cluster_pca_drivers", {"cluster_id": cluster_id, "top_n": 8})
             fig = None
-        elif intent == "cluster_graph_interpretation":
+            return {
+                "text": result.get("text"),
+                "figure": fig,
+                "summary_df": result.get("summary_df"),
+                "cluster_df": result.get("cluster_df"),
+                "pc1_table": result.get("pc1_table"),
+                "schema_df": result.get("schema_df"),
+                "column_df": result.get("column_df"),
+                "values_df": result.get("values_df"),
+                "preview_df": result.get("preview_df"),
+                "browse_df": result.get("browse_df"),
+                "analysis_df": result.get("analysis_df"),
+                "generated_code": result.get("generated_code"),
+                "execution_steps": result.get("execution_steps"),
+                "stdout": result.get("stdout"),
+                "bridge_ids": result.get("bridge_ids"),
+                "cluster_ids": result.get("cluster_ids"),
+                "label": result.get("label")
+            }
+
+        if intent == "cluster_graph_interpretation":
             result = execute_tool("cluster_graph_interpretation", {"cluster_id": cluster_id})
             fig = make_cluster_median_figure(cluster_id)
-        elif intent == "cluster_comparison_interpretation" and len(prior_cluster_ids) >= 2:
-            result = execute_tool("cluster_comparison_interpretation", {"cluster_id_1": prior_cluster_ids[0], "cluster_id_2": prior_cluster_ids[1]})
-            fig = make_compare_clusters_figure(prior_cluster_ids[0], prior_cluster_ids[1])
-        elif intent == "cluster_trend":
-            result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
-            fig = make_cluster_median_figure(cluster_id)
-        elif intent == "cluster_summary":
-            result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
-            fig = make_cluster_median_figure(cluster_id)
-        else:
-            result = execute_tool("cluster_deep_dive", {"cluster_id": cluster_id})
-            fig = None
+            return {
+                "text": result.get("text"),
+                "figure": fig,
+                "summary_df": result.get("summary_df"),
+                "cluster_df": result.get("cluster_df"),
+                "pc1_table": result.get("pc1_table"),
+                "schema_df": result.get("schema_df"),
+                "column_df": result.get("column_df"),
+                "values_df": result.get("values_df"),
+                "preview_df": result.get("preview_df"),
+                "browse_df": result.get("browse_df"),
+                "analysis_df": result.get("analysis_df"),
+                "generated_code": result.get("generated_code"),
+                "execution_steps": result.get("execution_steps"),
+                "stdout": result.get("stdout"),
+                "bridge_ids": result.get("bridge_ids"),
+                "cluster_ids": result.get("cluster_ids"),
+                "label": result.get("label")
+            }
 
+        if intent == "cluster_comparison_interpretation" and len(prior_cluster_ids) >= 2:
+            result = execute_tool(
+                "cluster_comparison_interpretation",
+                {"cluster_id_1": prior_cluster_ids[0], "cluster_id_2": prior_cluster_ids[1]}
+            )
+            fig = make_compare_clusters_figure(prior_cluster_ids[0], prior_cluster_ids[1])
+            return {
+                "text": result.get("text"),
+                "figure": fig,
+                "summary_df": result.get("summary_df"),
+                "cluster_df": result.get("cluster_df"),
+                "pc1_table": result.get("pc1_table"),
+                "schema_df": result.get("schema_df"),
+                "column_df": result.get("column_df"),
+                "values_df": result.get("values_df"),
+                "preview_df": result.get("preview_df"),
+                "browse_df": result.get("browse_df"),
+                "analysis_df": result.get("analysis_df"),
+                "generated_code": result.get("generated_code"),
+                "execution_steps": result.get("execution_steps"),
+                "stdout": result.get("stdout"),
+                "bridge_ids": result.get("bridge_ids"),
+                "cluster_ids": result.get("cluster_ids"),
+                "label": result.get("label")
+            }
+
+        if intent == "cluster_trend":
+            result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
+            fig = make_cluster_median_figure(cluster_id)
+            return {
+                "text": result.get("text"),
+                "figure": fig,
+                "summary_df": result.get("summary_df"),
+                "cluster_df": result.get("cluster_df"),
+                "pc1_table": result.get("pc1_table"),
+                "schema_df": result.get("schema_df"),
+                "column_df": result.get("column_df"),
+                "values_df": result.get("values_df"),
+                "preview_df": result.get("preview_df"),
+                "browse_df": result.get("browse_df"),
+                "analysis_df": result.get("analysis_df"),
+                "generated_code": result.get("generated_code"),
+                "execution_steps": result.get("execution_steps"),
+                "stdout": result.get("stdout"),
+                "bridge_ids": result.get("bridge_ids"),
+                "cluster_ids": result.get("cluster_ids"),
+                "label": result.get("label")
+            }
+
+        if intent == "cluster_summary":
+            result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
+            fig = make_cluster_median_figure(cluster_id)
+            return {
+                "text": result.get("text"),
+                "figure": fig,
+                "summary_df": result.get("summary_df"),
+                "cluster_df": result.get("cluster_df"),
+                "pc1_table": result.get("pc1_table"),
+                "schema_df": result.get("schema_df"),
+                "column_df": result.get("column_df"),
+                "values_df": result.get("values_df"),
+                "preview_df": result.get("preview_df"),
+                "browse_df": result.get("browse_df"),
+                "analysis_df": result.get("analysis_df"),
+                "generated_code": result.get("generated_code"),
+                "execution_steps": result.get("execution_steps"),
+                "stdout": result.get("stdout"),
+                "bridge_ids": result.get("bridge_ids"),
+                "cluster_ids": result.get("cluster_ids"),
+                "label": result.get("label")
+            }
+
+        result = execute_tool("cluster_deep_dive", {"cluster_id": cluster_id})
         return {
-            "text": result.get("text"), "figure": fig, "summary_df": result.get("summary_df"),
-            "cluster_df": result.get("cluster_df"), "pc1_table": result.get("pc1_table"),
-            "schema_df": result.get("schema_df"), "column_df": result.get("column_df"),
-            "values_df": result.get("values_df"), "preview_df": result.get("preview_df"),
-            "browse_df": result.get("browse_df"), "analysis_df": result.get("analysis_df"),
-            "generated_code": result.get("generated_code"), "execution_steps": result.get("execution_steps"),
-            "stdout": result.get("stdout"), "bridge_ids": result.get("bridge_ids"),
-            "cluster_ids": result.get("cluster_ids"), "label": result.get("label")
+            "text": result.get("text"),
+            "figure": None,
+            "summary_df": result.get("summary_df"),
+            "cluster_df": result.get("cluster_df"),
+            "pc1_table": result.get("pc1_table"),
+            "schema_df": result.get("schema_df"),
+            "column_df": result.get("column_df"),
+            "values_df": result.get("values_df"),
+            "preview_df": result.get("preview_df"),
+            "browse_df": result.get("browse_df"),
+            "analysis_df": result.get("analysis_df"),
+            "generated_code": result.get("generated_code"),
+            "execution_steps": result.get("execution_steps"),
+            "stdout": result.get("stdout"),
+            "bridge_ids": result.get("bridge_ids"),
+            "cluster_ids": result.get("cluster_ids"),
+            "label": result.get("label")
         }
 
+    # 2) Existing cluster pending compare
     pending_base = st.session_state.pending_compare_cluster
     followup_target = extract_compare_target(question)
+
     if pending_base is not None and followup_target is not None:
-        result = execute_tool("compare_clusters", {"cluster_id_1": pending_base, "cluster_id_2": followup_target})
+        result = execute_tool(
+            "compare_clusters",
+            {
+                "cluster_id_1": pending_base,
+                "cluster_id_2": followup_target
+            }
+        )
         st.session_state.pending_compare_cluster = None
-        fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"]) if result.get("show_compare_clusters_chart") else None
+
+        fig = None
+        if result.get("show_compare_clusters_chart"):
+            fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
+
         return {
-            "text": result.get("text"), "figure": fig, "summary_df": result.get("summary_df"),
-            "cluster_df": result.get("cluster_df"), "pc1_table": result.get("pc1_table"),
-            "schema_df": result.get("schema_df"), "column_df": result.get("column_df"),
-            "values_df": result.get("values_df"), "preview_df": result.get("preview_df"),
-            "browse_df": result.get("browse_df"), "analysis_df": result.get("analysis_df"),
-            "generated_code": result.get("generated_code"), "execution_steps": result.get("execution_steps"),
-            "stdout": result.get("stdout"), "bridge_ids": result.get("bridge_ids"),
-            "cluster_ids": result.get("cluster_ids"), "label": result.get("label")
+            "text": result.get("text"),
+            "figure": fig,
+            "summary_df": result.get("summary_df"),
+            "cluster_df": result.get("cluster_df"),
+            "pc1_table": result.get("pc1_table"),
+            "schema_df": result.get("schema_df"),
+            "column_df": result.get("column_df"),
+            "values_df": result.get("values_df"),
+            "preview_df": result.get("preview_df"),
+            "browse_df": result.get("browse_df"),
+            "analysis_df": result.get("analysis_df"),
+            "generated_code": result.get("generated_code"),
+            "execution_steps": result.get("execution_steps"),
+            "stdout": result.get("stdout"),
+            "bridge_ids": result.get("bridge_ids"),
+            "cluster_ids": result.get("cluster_ids"),
+            "label": result.get("label")
         }
 
+    # 3) Direct routing
+    routed = route_question(question)
+
+    if routed["mode"] == "direct_text":
+        st.session_state.pending_compare_cluster = routed.get("pending_compare_cluster")
+        return {
+            "text": routed["text"],
+            "figure": None,
+            "summary_df": None,
+            "cluster_df": None,
+            "pc1_table": None,
+            "schema_df": None,
+            "column_df": None,
+            "values_df": None,
+            "preview_df": None,
+            "browse_df": None,
+            "analysis_df": None,
+            "generated_code": None,
+            "execution_steps": None,
+            "stdout": None,
+            "bridge_ids": None,
+            "cluster_ids": None,
+            "label": None
+        }
+
+    if routed["mode"] == "direct_tool":
+        st.session_state.pending_compare_cluster = None
+        result = execute_tool(routed["tool_name"], routed["tool_input"])
+
+        fig = None
+        if result.get("show_cluster_chart"):
+            fig = make_cluster_median_figure(result["cluster_id"])
+        elif result.get("show_compare_clusters_chart"):
+            fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
+
+        return {
+            "text": result.get("text"),
+            "figure": fig,
+            "summary_df": result.get("summary_df"),
+            "cluster_df": result.get("cluster_df"),
+            "pc1_table": result.get("pc1_table"),
+            "schema_df": result.get("schema_df"),
+            "column_df": result.get("column_df"),
+            "values_df": result.get("values_df"),
+            "preview_df": result.get("preview_df"),
+            "browse_df": result.get("browse_df"),
+            "analysis_df": result.get("analysis_df"),
+            "generated_code": result.get("generated_code"),
+            "execution_steps": result.get("execution_steps"),
+            "stdout": result.get("stdout"),
+            "bridge_ids": result.get("bridge_ids"),
+            "cluster_ids": result.get("cluster_ids"),
+            "label": result.get("label")
+        }
+
+    # 4) Bedrock + tool use
     st.session_state.pending_compare_cluster = None
     result = ask_bedrock_with_tools(question)
     fig = None
     chart = result.get("chart")
+
     if chart:
         if chart["type"] == "trend":
             fig = make_bridge_trend_figure(chart["bridge_id"])
@@ -3320,103 +3432,256 @@ def answer_question(question):
             fig = make_compare_clusters_figure(chart["cluster_id_1"], chart["cluster_id_2"])
 
     return {
-        "text": result.get("text"), "figure": fig, "summary_df": result.get("summary_df"),
-        "cluster_df": result.get("cluster_df"), "pc1_table": result.get("pc1_table"),
-        "schema_df": result.get("schema_df"), "column_df": result.get("column_df"),
-        "values_df": result.get("values_df"), "preview_df": result.get("preview_df"),
-        "browse_df": result.get("browse_df"), "analysis_df": result.get("analysis_df"),
-        "generated_code": result.get("generated_code"), "execution_steps": result.get("execution_steps"),
-        "stdout": result.get("stdout"), "bridge_ids": result.get("bridge_ids"), "label": result.get("label")
+        "text": result.get("text"),
+        "figure": fig,
+        "summary_df": result.get("summary_df"),
+        "cluster_df": result.get("cluster_df"),
+        "pc1_table": result.get("pc1_table"),
+        "schema_df": result.get("schema_df"),
+        "column_df": result.get("column_df"),
+        "values_df": result.get("values_df"),
+        "preview_df": result.get("preview_df"),
+        "browse_df": result.get("browse_df"),
+        "analysis_df": result.get("analysis_df"),
+        "generated_code": result.get("generated_code"),
+        "execution_steps": result.get("execution_steps"),
+        "stdout": result.get("stdout"),
+        "bridge_ids": result.get("bridge_ids"),
+        "label": result.get("label")
     }
 
 # ---------------------------
 # Sidebar
 # ---------------------------
+sample_df = bridge_summary.dropna(subset=["deterioration_slope_per_year"]).copy()
+
+example_1 = sample_df.sample(1)["STRUCTURE_NUMBER_008"].iloc[0]
+example_2 = sample_df[
+    sample_df["Cluster"] != sample_df[sample_df["STRUCTURE_NUMBER_008"] == example_1]["Cluster"].iloc[0]
+].sample(1)["STRUCTURE_NUMBER_008"].iloc[0]
+example_3 = sample_df.sort_values("deterioration_slope_per_year").iloc[0]["STRUCTURE_NUMBER_008"]
+
 with st.sidebar:
     st.subheader("Dataset")
-    st.write(f"This dataset contains {pivot_df.shape[0]:,} bridges.")
+    st.write("This dataset contains 1,378 bridges.")
     st.write(f"Years: {min(years_available)}–{max(years_available)}")
-    st.write("Use a bridge ID from STRUCTURE_NUMBER_008")
-    st.write("")
+    st.caption("Use a bridge ID from STRUCTURE_NUMBER_008")
     st.write("Example questions:")
-    st.write("Give me an overview of the bridge deterioration dataset")
-    st.write("Show trend for bridge 200000HO0109010")
-    st.write("Compare bridge 200000HO0109010 and 200000A-0094010")
-    st.write("Summarize cluster 2")
-    st.write("Compare cluster 2 and cluster 3")
-    st.write("Interpret cluster 2 graph")
-    st.write("Compare the graphs of cluster 2 and cluster 3")
-    st.write("What features characterize cluster 5?")
-    st.write("What columns are in the dataset?")
-    st.write("Show me the first 10 rows of the dataset")
-    st.write("Browse dataset rows")
-    st.write("Show the fastest deteriorating bridges")
-    st.write("Show the 5 worst bridges in 2020")
-    st.write("Show the 5 best bridges in 2020")
-    st.write("Give me the profile for bridge 200000CE0075010")
+    st.markdown(f"""
+    - Give me an overview of the bridge deterioration dataset
+    - Show trend for bridge {example_1}
+    - Compare bridge {example_1} and {example_2}
+    - Summarize cluster 2
+    - Compare cluster 2 and cluster 3
+    - Interpret cluster 2 graph
+    - Compare the graphs of cluster 2 and cluster 3
+    - What features characterize cluster 5?
+    - What columns are in the dataset?
+    - Show me the first 10 rows of the dataset
+    - Browse dataset rows
+    - Show the fastest deteriorating bridges
+    - Show the 5 worst bridges in 2020
+    - Show the 5 best bridges in 2020
+    - Give me the profile for bridge {example_3}
+    """)
+
+    open_explorer = st.checkbox("Open dataset explorer")
+
+if open_explorer:
+    render_paginated_dataframe(
+        static_df,
+        key_prefix="main_dataset",
+        title="Full Dataset Explorer"
+    )
 
 # ---------------------------
-# Render prior messages
+# Chat history
 # ---------------------------
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+for idx, message in enumerate(st.session_state.messages):
+    with st.chat_message(message["role"]):
+        if message.get("content"):
+            st.write(message["content"])
+
+        if "pc1_table" in message and message["pc1_table"] is not None:
+            st.subheader("PC1 Loadings")
+            st.dataframe(pd.DataFrame(message["pc1_table"]), use_container_width=True)
+
+        if "summary_df" in message and message["summary_df"] is not None:
+            st.subheader("Dataset Summary")
+            st.dataframe(pd.DataFrame(message["summary_df"]), use_container_width=True)
+
+        if "cluster_df" in message and message["cluster_df"] is not None:
+            st.subheader("Cluster Distribution")
+            st.dataframe(pd.DataFrame(message["cluster_df"]), use_container_width=True)
+
+        if "schema_df" in message and message["schema_df"] is not None:
+            st.subheader("Dataset Schema")
+            st.dataframe(pd.DataFrame(message["schema_df"]), use_container_width=True)
+
+        if "column_df" in message and message["column_df"] is not None:
+            st.subheader("Column Details")
+            st.dataframe(pd.DataFrame(message["column_df"]), use_container_width=True)
+
+        if "values_df" in message and message["values_df"] is not None:
+            st.subheader("Column Values")
+            st.dataframe(pd.DataFrame(message["values_df"]), use_container_width=True)
+
+        if "preview_df" in message and message["preview_df"] is not None:
+            st.subheader("Dataset Preview")
+            st.dataframe(pd.DataFrame(message["preview_df"]), use_container_width=True)
+
+        if "browse_df" in message and message["browse_df"] is not None:
+            render_paginated_dataframe(
+                pd.DataFrame(message["browse_df"]),
+                key_prefix=f"history_browse_{idx}",
+                title="Dataset Rows"
+            )
+
+        if "analysis_df" in message and message["analysis_df"] is not None:
+            st.subheader("Analysis Results")
+            st.dataframe(pd.DataFrame(message["analysis_df"]), use_container_width=True)
+
+        if "execution_steps" in message and message["execution_steps"] is not None:
+            with st.expander("Analysis Steps"):
+                for step in message["execution_steps"]:
+                    st.write(f"- {step}")
+
+        if "generated_code" in message and message["generated_code"] is not None:
+            with st.expander("Generated Python Code"):
+                st.code(message["generated_code"], language="python")
+
+        if "stdout" in message and message["stdout"]:
+            with st.expander("Execution Log"):
+                st.text(message["stdout"])
+
+        if "figure_key" in message and message["figure_key"] in st.session_state:
+            st.pyplot(st.session_state[message["figure_key"]])
 
 # ---------------------------
 # Chat input
 # ---------------------------
-user_input = st.chat_input("Ask a question about the bridge dataset...")
+user_prompt = st.chat_input("Ask a question about the bridge dataset...")
 
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
+if user_prompt:
+    st.session_state.messages.append({"role": "user", "content": user_prompt})
 
     with st.chat_message("user"):
-        st.markdown(user_input)
+        st.write(user_prompt)
+
+    result = answer_question(user_prompt)
+
+    update_last_result_context(user_prompt, result)
+
+    assistant_message = {
+        "role": "assistant",
+        "content": result.get("text")
+    }
+
+    if result.get("pc1_table") is not None:
+        assistant_message["pc1_table"] = result["pc1_table"].to_dict(orient="records")
+
+    if result.get("summary_df") is not None:
+        assistant_message["summary_df"] = result["summary_df"].to_dict(orient="records")
+
+    if result.get("cluster_df") is not None:
+        assistant_message["cluster_df"] = result["cluster_df"].to_dict(orient="records")
+
+    if result.get("schema_df") is not None:
+        assistant_message["schema_df"] = result["schema_df"].to_dict(orient="records")
+
+    if result.get("column_df") is not None:
+        assistant_message["column_df"] = result["column_df"].to_dict(orient="records")
+
+    if result.get("values_df") is not None:
+        assistant_message["values_df"] = result["values_df"].to_dict(orient="records")
+
+    if result.get("preview_df") is not None:
+        assistant_message["preview_df"] = result["preview_df"].to_dict(orient="records")
+
+    if result.get("browse_df") is not None:
+        assistant_message["browse_df"] = result["browse_df"].to_dict(orient="records")
+
+    if result.get("analysis_df") is not None:
+        assistant_message["analysis_df"] = result["analysis_df"].to_dict(orient="records")
+
+    if result.get("generated_code") is not None:
+        assistant_message["generated_code"] = result["generated_code"]
+
+    if result.get("execution_steps") is not None:
+        assistant_message["execution_steps"] = result["execution_steps"]
+
+    if result.get("stdout") is not None:
+        assistant_message["stdout"] = result["stdout"]
+
+    if result.get("bridge_ids") is not None:
+        assistant_message["bridge_ids"] = result["bridge_ids"]
+
+    if result.get("cluster_ids") is not None:
+        assistant_message["cluster_ids"] = result["cluster_ids"]
+
+    if result.get("label") is not None:
+        assistant_message["label"] = result["label"]
 
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing..."):
-            response = answer_question(user_input)
+        if result.get("text"):
+            st.write(result["text"])
 
-            response_text = response.get("text", "I couldn’t generate a response.")
-            st.markdown(response_text)
+        if result.get("pc1_table") is not None:
+            st.subheader("PC1 Loadings")
+            st.dataframe(result["pc1_table"], use_container_width=True)
 
-            if response.get("figure") is not None:
-                st.pyplot(response["figure"])
+        if result.get("summary_df") is not None:
+            st.subheader("Dataset Summary")
+            st.dataframe(result["summary_df"], use_container_width=True)
 
-            if response.get("summary_df") is not None:
-                st.subheader("Dataset Summary")
-                st.dataframe(response["summary_df"], use_container_width=True)
+        if result.get("cluster_df") is not None:
+            st.subheader("Cluster Distribution")
+            st.dataframe(result["cluster_df"], use_container_width=True)
 
-            if response.get("cluster_df") is not None:
-                st.subheader("Cluster Distribution")
-                st.dataframe(response["cluster_df"], use_container_width=True)
+        if result.get("schema_df") is not None:
+            st.subheader("Dataset Schema")
+            st.dataframe(result["schema_df"], use_container_width=True)
 
-            if response.get("pc1_table") is not None:
-                st.subheader("PC1 Loadings")
-                st.dataframe(response["pc1_table"], use_container_width=True)
+        if result.get("column_df") is not None:
+            st.subheader("Column Details")
+            st.dataframe(result["column_df"], use_container_width=True)
 
-            if response.get("schema_df") is not None:
-                st.subheader("Dataset Schema")
-                st.dataframe(response["schema_df"], use_container_width=True)
+        if result.get("values_df") is not None:
+            st.subheader("Column Values")
+            st.dataframe(result["values_df"], use_container_width=True)
 
-            if response.get("column_df") is not None:
-                st.subheader("Column Summary")
-                st.dataframe(response["column_df"], use_container_width=True)
+        if result.get("preview_df") is not None:
+            st.subheader("Dataset Preview")
+            st.dataframe(result["preview_df"], use_container_width=True)
 
-            if response.get("values_df") is not None:
-                st.subheader("Sample Values")
-                st.dataframe(response["values_df"], use_container_width=True)
+        if result.get("browse_df") is not None:
+            render_paginated_dataframe(
+                result["browse_df"],
+                key_prefix="current_browse",
+                title="Dataset Rows"
+            )
 
-            if response.get("preview_df") is not None:
-                st.subheader("Dataset Preview")
-                st.dataframe(response["preview_df"], use_container_width=True)
+        if result.get("analysis_df") is not None:
+            st.subheader("Analysis Results")
+            st.dataframe(result["analysis_df"], use_container_width=True)
 
-            if response.get("browse_df") is not None:
-                st.subheader("Dataset Rows")
-                render_paginated_dataframe(response["browse_df"], key_prefix="browse_result", title="Dataset Rows")
+        if result.get("execution_steps") is not None:
+            with st.expander("Analysis Steps"):
+                for step in result["execution_steps"]:
+                    st.write(f"- {step}")
 
-            if response.get("analysis_df") is not None:
-                st.subheader("Analysis Results")
-                st.dataframe(response["analysis_df"], use_container_width=True)
+        if result.get("generated_code") is not None:
+            with st.expander("Generated Python Code"):
+                st.code(result["generated_code"], language="python")
 
-    st.session_state.messages.append({"role": "assistant", "content": response_text})
+        if result.get("stdout"):
+            with st.expander("Execution Log"):
+                st.text(result["stdout"])
+
+        if result.get("figure") is not None:
+            figure_key = f"fig_{len(st.session_state.messages)}"
+            st.session_state[figure_key] = result["figure"]
+            assistant_message["figure_key"] = figure_key
+            st.pyplot(result["figure"])
+
+    st.session_state.messages.append(assistant_message)
