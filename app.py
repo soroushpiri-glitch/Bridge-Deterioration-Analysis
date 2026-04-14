@@ -569,7 +569,16 @@ def is_cluster_followup(question: str):
         "analyze it further",
         "tell me more",
         "what else about it",
-        "what else for this cluster"
+        "what else for this cluster",
+        "median bhi line",
+        "median line",
+        "interpret the median",
+        "interpret this plot",
+        "interpret this graph",
+        "fluctuations in bhi",
+        "fluctuations over time",
+        "variation over time",
+        "what do the fluctuations mean"
     ]
 
     return any(p in q for p in phrases)
@@ -577,6 +586,23 @@ def is_cluster_followup(question: str):
 
 def resolve_cluster_followup_intent(question: str):
     q = question.lower().strip()
+
+    if any(p in q for p in [
+        "median bhi line",
+        "median line",
+        "interpret the median",
+        "interpret this plot",
+        "interpret this graph"
+    ]):
+        return "cluster_median_interpretation"
+
+    if any(p in q for p in [
+        "fluctuations in bhi",
+        "fluctuations over time",
+        "variation over time",
+        "what do the fluctuations mean"
+    ]):
+        return "cluster_fluctuation_interpretation"
 
     if any(p in q for p in [
         "interesting analysis",
@@ -1839,6 +1865,137 @@ def get_cluster_deep_dive(cluster_id):
     }
 
 
+
+
+def get_cluster_trend_stats(cluster_id):
+    try:
+        cluster_id = int(cluster_id)
+    except Exception:
+        return None
+
+    subset = clustered_df[clustered_df["Cluster"] == cluster_id].drop(columns="Cluster", errors="ignore").copy()
+    if subset.empty:
+        return None
+
+    years_local = [c for c in subset.columns if isinstance(c, (int, np.integer, float, np.floating))]
+    if not years_local:
+        return None
+
+    subset = subset[years_local].copy()
+    subset = subset.apply(pd.to_numeric, errors="coerce")
+
+    median_trend = subset.median(axis=0)
+    q1_trend = subset.quantile(0.25, axis=0)
+    q3_trend = subset.quantile(0.75, axis=0)
+    iqr_trend = q3_trend - q1_trend
+
+    valid_idx = median_trend.dropna().index.tolist()
+    if len(valid_idx) < 2:
+        return None
+
+    first_year = int(valid_idx[0])
+    last_year = int(valid_idx[-1])
+
+    first_median = float(median_trend.loc[first_year])
+    last_median = float(median_trend.loc[last_year])
+    net_change = last_median - first_median
+
+    x = np.array(valid_idx, dtype=float)
+    y = np.array([median_trend.loc[yr] for yr in valid_idx], dtype=float)
+
+    if len(x) >= 2 and np.isfinite(y).sum() >= 2:
+        slope, _, _, _, _ = linregress(x, y)
+    else:
+        slope = np.nan
+
+    peak_year = int(median_trend.idxmax())
+    trough_year = int(median_trend.idxmin())
+    peak_value = float(median_trend.max())
+    trough_value = float(median_trend.min())
+
+    avg_iqr = float(iqr_trend.mean()) if not iqr_trend.empty else np.nan
+    max_iqr_year = int(iqr_trend.idxmax()) if not iqr_trend.empty else None
+    max_iqr_value = float(iqr_trend.max()) if not iqr_trend.empty else np.nan
+
+    return {
+        "cluster_id": cluster_id,
+        "n_bridges": int(subset.shape[0]),
+        "years": valid_idx,
+        "first_year": first_year,
+        "last_year": last_year,
+        "first_median": first_median,
+        "last_median": last_median,
+        "net_change": net_change,
+        "slope": float(slope) if pd.notna(slope) else np.nan,
+        "peak_year": peak_year,
+        "peak_value": peak_value,
+        "trough_year": trough_year,
+        "trough_value": trough_value,
+        "avg_iqr": avg_iqr,
+        "max_iqr_year": max_iqr_year,
+        "max_iqr_value": max_iqr_value,
+        "median_trend": median_trend,
+        "iqr_trend": iqr_trend,
+    }
+
+
+def interpret_slope_text(slope):
+    if pd.isna(slope):
+        return "no clear trend could be estimated"
+    if slope > 0.1:
+        return "an overall improving trend"
+    if slope < -0.1:
+        return "an overall deteriorating trend"
+    return "a largely stable trend"
+
+
+def interpret_cluster_trend(cluster_id):
+    stats = get_cluster_trend_stats(cluster_id)
+    if stats is None:
+        return f"I couldn’t compute the median trend for cluster {cluster_id}."
+
+    trend_text = interpret_slope_text(stats["slope"])
+
+    return (
+        f"For cluster {cluster_id}, the median BHI line represents the middle Bridge Health Index value across all bridges in the cluster at each year.\n\n"
+        f"In this cluster, the median line shows {trend_text} from {stats['first_year']} to {stats['last_year']}. "
+        f"The median BHI changes from {stats['first_median']:.2f} to {stats['last_median']:.2f}, "
+        f"which is a net change of {stats['net_change']:.2f} points. "
+        f"The highest median value occurs around {stats['peak_year']} at {stats['peak_value']:.2f}, "
+        f"and the lowest occurs around {stats['trough_year']} at {stats['trough_value']:.2f}.\n\n"
+        f"So, the median line should be read as the typical bridge trajectory in this cluster, not every individual bridge. "
+        f"If individual lines spread away from the median, that means some bridges behave differently from the cluster’s typical pattern."
+    )
+
+
+def interpret_cluster_fluctuations(cluster_id):
+    stats = get_cluster_trend_stats(cluster_id)
+    if stats is None:
+        return f"I couldn’t compute fluctuation statistics for cluster {cluster_id}."
+
+    if pd.isna(stats["avg_iqr"]):
+        variability_text = "I could not estimate the year-to-year spread reliably."
+    elif stats["avg_iqr"] < 5:
+        variability_text = "Fluctuations are relatively small, which means bridges in this cluster behave fairly consistently around the median."
+    elif stats["avg_iqr"] < 15:
+        variability_text = "Fluctuations are moderate, which means there is some variation across bridges, but the cluster still follows a common overall pattern."
+    else:
+        variability_text = "Fluctuations are relatively large, which means bridges in this cluster differ substantially from one another over time."
+
+    extra_text = ""
+    if stats["max_iqr_year"] is not None and pd.notna(stats["max_iqr_value"]):
+        extra_text = (
+            f" The largest spread appears around {stats['max_iqr_year']}, "
+            f"where the interquartile range is {stats['max_iqr_value']:.2f}."
+        )
+
+    return (
+        f"For cluster {cluster_id}, fluctuations in BHI over time should be interpreted as variation around the cluster median line.\n\n"
+        f"{variability_text}{extra_text}\n\n"
+        f"If the median line itself moves sharply upward or downward, that indicates a cluster-level shift in typical bridge condition. "
+        f"If the median stays fairly steady but the individual bridge lines are widely scattered, that means the cluster contains bridges with mixed behaviors even though the typical value is stable."
+    )
+
 # ---------------------------
 # Plotting
 # ---------------------------
@@ -2056,6 +2213,39 @@ def extract_cluster_ids(text):
 def route_question(question: str):
     q = question.lower().strip()
     cluster_ids_local = extract_cluster_ids(q)
+
+    if (
+        len(cluster_ids_local) == 1 and
+        any(phrase in q for phrase in [
+            "median bhi line",
+            "median line",
+            "interpret the median",
+            "interpret this plot",
+            "interpret this graph"
+        ])
+    ):
+        return {
+            "mode": "direct_text",
+            "text": interpret_cluster_trend(cluster_ids_local[0]),
+            "cluster_ids": [cluster_ids_local[0]],
+            "label": "cluster_median_interpretation"
+        }
+
+    if (
+        len(cluster_ids_local) == 1 and
+        any(phrase in q for phrase in [
+            "fluctuations in bhi",
+            "fluctuations over time",
+            "variation over time",
+            "what do the fluctuations mean"
+        ])
+    ):
+        return {
+            "mode": "direct_text",
+            "text": interpret_cluster_fluctuations(cluster_ids_local[0]),
+            "cluster_ids": [cluster_ids_local[0]],
+            "label": "cluster_fluctuation_interpretation"
+        }
 
     if (
         len(cluster_ids_local) == 1 and
@@ -2791,9 +2981,15 @@ def ask_bedrock_with_tools(user_prompt):
                     toolConfig=get_tool_config()
                 )
             except (BotoCoreError, ClientError) as e:
+                fallback_text = "I ran the requested analysis, but the follow-up model response failed."
+                if pending_analysis_df is not None or pending_summary_df is not None or pending_pc1_table is not None:
+                    fallback_text += " The computed result is still available below."
+                else:
+                    fallback_text += f" Error: {e}"
+
                 return {
-                    "text": f"Bedrock follow-up request failed: {e}",
-                    "chart": None,
+                    "text": fallback_text,
+                    "chart": pending_chart,
                     "summary_df": pending_summary_df,
                     "cluster_df": pending_cluster_df,
                     "pc1_table": pending_pc1_table,
@@ -2907,6 +3103,50 @@ def answer_question(question):
         cluster_id = prior_cluster_ids[0]
 
         intent = resolve_cluster_followup_intent(question)
+
+        if intent == "cluster_median_interpretation":
+            fig = make_cluster_median_figure(cluster_id)
+            return {
+                "text": interpret_cluster_trend(cluster_id),
+                "figure": fig,
+                "summary_df": None,
+                "cluster_df": None,
+                "pc1_table": None,
+                "schema_df": None,
+                "column_df": None,
+                "values_df": None,
+                "preview_df": None,
+                "browse_df": None,
+                "analysis_df": None,
+                "generated_code": None,
+                "execution_steps": None,
+                "stdout": None,
+                "bridge_ids": None,
+                "cluster_ids": [cluster_id],
+                "label": "cluster_median_interpretation"
+            }
+
+        if intent == "cluster_fluctuation_interpretation":
+            fig = make_cluster_median_figure(cluster_id)
+            return {
+                "text": interpret_cluster_fluctuations(cluster_id),
+                "figure": fig,
+                "summary_df": None,
+                "cluster_df": None,
+                "pc1_table": None,
+                "schema_df": None,
+                "column_df": None,
+                "values_df": None,
+                "preview_df": None,
+                "browse_df": None,
+                "analysis_df": None,
+                "generated_code": None,
+                "execution_steps": None,
+                "stdout": None,
+                "bridge_ids": None,
+                "cluster_ids": [cluster_id],
+                "label": "cluster_fluctuation_interpretation"
+            }
 
         if intent == "cluster_pca":
             result = execute_tool("cluster_pca_drivers", {"cluster_id": cluster_id, "top_n": 8})
@@ -3057,8 +3297,8 @@ def answer_question(question):
             "execution_steps": None,
             "stdout": None,
             "bridge_ids": None,
-            "cluster_ids": None,
-            "label": None
+            "cluster_ids": routed.get("cluster_ids"),
+            "label": routed.get("label")
         }
 
     if routed["mode"] == "direct_tool":
