@@ -549,16 +549,17 @@ def find_best_bridge_match(bridge_id: str):
         return None
 
     candidate = str(bridge_id).strip()
+    bridge_ids_str = [str(b).strip() for b in bridge_ids]
 
-    exact_matches = [b for b in bridge_ids if b == candidate]
+    exact_matches = [b for b in bridge_ids_str if b == candidate]
     if exact_matches:
         return exact_matches[0]
 
-    contains_matches = [b for b in bridge_ids if candidate in b]
+    contains_matches = [b for b in bridge_ids_str if candidate in b]
     if contains_matches:
         return contains_matches[0]
 
-    reverse_contains = [b for b in bridge_ids if b in candidate]
+    reverse_contains = [b for b in bridge_ids_str if b in candidate]
     if reverse_contains:
         return reverse_contains[0]
 
@@ -1359,6 +1360,7 @@ Rules:
 - If returning a table, store it in a variable named result_df.
 - If the question cannot be answered from the available dataframes, set:
   result_text = "I couldn’t find this information in the dataset."
+- Do not attempt forecasting or projection. Forecasting requests must be handled by the dedicated forecast tool, not generated Python code.
 - Return only executable Python code. No markdown fences.
 
 User request:
@@ -2532,17 +2534,16 @@ def route_question(question: str):
         if bridge_id is None:
             return {
                 "mode": "direct_text",
-                "text": "Please include a bridge ID for forecasting, for example: Forecast bridge 200000P-0188010 for the next 20 years."
+                "text": "Please include a valid bridge ID for forecasting, for example: Forecast bridge 100000010113013 for the next 20 years."
             }
 
-        result = forecast_bridge_20_years(bridge_id, forecast_horizon=20)
-
-        if "analysis_df" in result and result.get("analysis_df") is not None and not result["analysis_df"].empty:
-            result["figure"] = make_bridge_forecast_figure(bridge_id, result["analysis_df"])
-
         return {
-            "mode": "direct_result",
-            "result": result
+            "mode": "direct_tool",
+            "tool_name": "forecast_bridge_20_years",
+            "tool_input": {
+                "bridge_id": bridge_id,
+                "forecast_horizon": 20
+            }
         }
 
     if (
@@ -2955,6 +2956,22 @@ def get_tool_config():
             },
             {
                 "toolSpec": {
+                    "name": "forecast_bridge_20_years",
+                    "description": "Forecast the next N years of overall Bridge Health Index for a specific bridge using the trained recursive forecast model.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "bridge_id": {"type": "string"},
+                                "forecast_horizon": {"type": "integer"}
+                            },
+                            "required": ["bridge_id"]
+                        }
+                    }
+                }
+            },
+            {
+                "toolSpec": {
                     "name": "python_analysis",
                     "description": "Generate and run restricted Python analysis on the loaded bridge dataframes when existing tools are insufficient.",
                     "inputSchema": {
@@ -3091,6 +3108,14 @@ def execute_tool(tool_name, tool_input):
         cluster_id_1 = int(tool_input["cluster_id_1"])
         cluster_id_2 = int(tool_input["cluster_id_2"])
         return interpret_cluster_comparison(cluster_id_1, cluster_id_2)
+
+    if tool_name == "forecast_bridge_20_years":
+        bridge_id = tool_input["bridge_id"]
+        forecast_horizon = int(tool_input.get("forecast_horizon", 20))
+        result = forecast_bridge_20_years(bridge_id=bridge_id, forecast_horizon=forecast_horizon)
+        if result.get("analysis_df") is not None and not result["analysis_df"].empty:
+            result["figure"] = make_bridge_forecast_figure(bridge_id, result["analysis_df"])
+        return result
 
     if tool_name == "python_analysis":
         user_request = tool_input["user_request"]
