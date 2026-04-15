@@ -271,6 +271,179 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
         "preprocessing_summary": preprocessing_summary
     }
 
+
+def compute_empirical_deterioration_rate(static_df: pd.DataFrame) -> float:
+    """
+    Empirical average annual deterioration rate based on the mean absolute
+    year-over-year BHI change across all bridges.
+    """
+    df = static_df.copy()
+    needed = ["STRUCTURE_NUMBER_008", "Year of Data", "Bridge Health Index (Overall)"]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        return EMPIRICAL_DETERIORATION_RATE
+
+    df = df[needed].dropna().copy()
+    df["Year of Data"] = pd.to_numeric(df["Year of Data"], errors="coerce")
+    df["Bridge Health Index (Overall)"] = pd.to_numeric(df["Bridge Health Index (Overall)"], errors="coerce")
+    df = df.dropna().copy()
+    if df.empty:
+        return EMPIRICAL_DETERIORATION_RATE
+
+    df["Year of Data"] = df["Year of Data"].astype(int)
+    df = df.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"])
+    df["annual_bhi_change"] = df.groupby("STRUCTURE_NUMBER_008")["Bridge Health Index (Overall)"].diff()
+
+    empirical_rate = df["annual_bhi_change"].abs().mean()
+    if pd.isna(empirical_rate):
+        return EMPIRICAL_DETERIORATION_RATE
+    return float(empirical_rate)
+
+
+def compute_empirical_adt_growth_rate(static_df: pd.DataFrame) -> float:
+    """
+    Estimate an average annual multiplicative ADT growth rate from historical data
+    using linear regression on log(ADT) by year for each bridge.
+    """
+    adt_col = None
+    for c in static_df.columns:
+        cl = str(c).lower()
+        if c == "ADT_029" or cl == "adt_029" or cl == "adt":
+            adt_col = c
+            break
+    if adt_col is None:
+        return ADT_GROWTH_RATE
+
+    df = static_df[["STRUCTURE_NUMBER_008", "Year of Data", adt_col]].dropna().copy()
+    if df.empty:
+        return ADT_GROWTH_RATE
+
+    df["Year of Data"] = pd.to_numeric(df["Year of Data"], errors="coerce")
+    df[adt_col] = pd.to_numeric(df[adt_col], errors="coerce")
+    df = df.dropna().copy()
+    df = df[df[adt_col] > 0].copy()
+    if df.empty:
+        return ADT_GROWTH_RATE
+
+    df["Year of Data"] = df["Year of Data"].astype(int)
+    df = df.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"])
+
+    slopes = []
+    for _, g in df.groupby("STRUCTURE_NUMBER_008"):
+        if len(g) >= 2:
+            x = g["Year of Data"].values.astype(float)
+            y = np.log(g[adt_col].values.astype(float))
+            try:
+                slope, _, _, _, _ = linregress(x, y)
+                if np.isfinite(slope):
+                    slopes.append(float(slope))
+            except Exception:
+                pass
+
+    if not slopes:
+        return ADT_GROWTH_RATE
+
+    rate = float(np.mean(slopes))
+    return max(-0.2, min(0.2, rate))
+
+
+def compute_empirical_temperature_change(static_df: pd.DataFrame) -> float:
+    """
+    Estimate the average annual additive temperature change from historical data.
+    """
+    temp_col = None
+    for c in static_df.columns:
+        if "temp" in str(c).lower():
+            temp_col = c
+            break
+    if temp_col is None:
+        return TEMP_INCREASE_RATE
+
+    df = static_df[["STRUCTURE_NUMBER_008", "Year of Data", temp_col]].dropna().copy()
+    if df.empty:
+        return TEMP_INCREASE_RATE
+
+    df["Year of Data"] = pd.to_numeric(df["Year of Data"], errors="coerce")
+    df[temp_col] = pd.to_numeric(df[temp_col], errors="coerce")
+    df = df.dropna().copy()
+    if df.empty:
+        return TEMP_INCREASE_RATE
+
+    df["Year of Data"] = df["Year of Data"].astype(int)
+    df = df.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"])
+
+    slopes = []
+    for _, g in df.groupby("STRUCTURE_NUMBER_008"):
+        if len(g) >= 2:
+            x = g["Year of Data"].values.astype(float)
+            y = g[temp_col].values.astype(float)
+            try:
+                slope, _, _, _, _ = linregress(x, y)
+                if np.isfinite(slope):
+                    slopes.append(float(slope))
+            except Exception:
+                pass
+
+    if not slopes:
+        return TEMP_INCREASE_RATE
+
+    rate = float(np.mean(slopes))
+    return max(-5.0, min(5.0, rate))
+
+
+def uncertainty_factor(h: int, coeffs) -> float:
+    val = coeffs[0] * (h ** 2) + coeffs[1] * h + coeffs[2]
+    return max(0.0, float(val))
+
+
+@st.cache_resource
+def fit_uncertainty_curve(static_df: pd.DataFrame):
+    """
+    Fit a quadratic uncertainty curve:
+        Uncertainty(h) = alpha + beta*h + gamma*h^2
+    using rolling horizon errors (h = 1..5) from the trained stacking model.
+    """
+    model_df, feature_cols, target_col = prepare_forecast_data(static_df)
+    if model_df.empty:
+        return np.array([0.0, 0.0, 3.0])
+
+    trained = train_forecast_model(static_df)
+    model = trained["model"]
+
+    errors_by_h = {h: [] for h in range(1, 6)}
+
+    for _, g in model_df.groupby("STRUCTURE_NUMBER_008"):
+        g = g.sort_values("Year of Data").reset_index(drop=True)
+        if len(g) < 8:
+            continue
+
+        values = g[target_col].values.astype(float)
+        for i in range(2, len(g) - 1):
+            current = values[i]
+            for h in range(1, 6):
+                j = i + h
+                if j >= len(g):
+                    break
+                pred = current - empirical_deterioration_rate * h
+                actual = values[j]
+                if np.isfinite(pred) and np.isfinite(actual):
+                    errors_by_h[h].append(abs(actual - pred))
+
+    horizons = []
+    mae_vals = []
+    for h in range(1, 6):
+        vals = errors_by_h[h]
+        if vals:
+            horizons.append(h)
+            mae_vals.append(float(np.mean(vals)))
+
+    if len(horizons) < 3:
+        fallback = max(1.0, float(trained.get("residual_std", 3.0)))
+        return np.array([0.0, 0.0, fallback])
+
+    coeffs = np.polyfit(horizons, mae_vals, deg=2)
+    return coeffs
+
 # ---------------------------
 # Forecast methodology
 # ---------------------------
@@ -323,8 +496,13 @@ def _prepare_bridge_forecast_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         candidates=["Approx_Avg_Temp", "AVG_TEMP", "MEAN_TEMP"],
         contains=["temp"]
     )
+    adt_col = _find_optional_column(
+        data,
+        candidates=["ADT_029", "ADT"],
+        contains=["adt"]
+    )
 
-    for col in [year_built_col, recon_col, temp_col]:
+    for col in [year_built_col, recon_col, temp_col, adt_col]:
         if col is not None:
             data[col] = pd.to_numeric(data[col], errors="coerce")
 
@@ -345,7 +523,11 @@ def _prepare_bridge_forecast_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     if recon_col is not None:
         data["Time_Since_Last_Reconstruction"] = data["Year of Data"] - data[recon_col]
-        data.loc[(data["Time_Since_Last_Reconstruction"] < 0) | (data["Time_Since_Last_Reconstruction"] > 300), "Time_Since_Last_Reconstruction"] = np.nan
+        data.loc[
+            (data["Time_Since_Last_Reconstruction"] < 0) |
+            (data["Time_Since_Last_Reconstruction"] > 300),
+            "Time_Since_Last_Reconstruction"
+        ] = np.nan
     else:
         data["Time_Since_Last_Reconstruction"] = data["Years_Since_First_Observation"]
 
@@ -354,7 +536,12 @@ def _prepare_bridge_forecast_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     else:
         data["Approx_Avg_Temp"] = 0.0
 
-    for col in ["Bridge_Age", "Time_Since_Last_Reconstruction", "Approx_Avg_Temp"]:
+    if adt_col is not None:
+        data["ADT_Current"] = data[adt_col]
+    else:
+        data["ADT_Current"] = 0.0
+
+    for col in ["Bridge_Age", "Time_Since_Last_Reconstruction", "Approx_Avg_Temp", "ADT_Current"]:
         data[col] = pd.to_numeric(data[col], errors="coerce")
         data[col] = data.groupby("STRUCTURE_NUMBER_008")[col].transform(lambda s: s.ffill().bfill())
         data[col] = data[col].fillna(0)
@@ -375,6 +562,7 @@ def prepare_forecast_data(static_df: pd.DataFrame):
         "Bridge_Age",
         "Time_Since_Last_Reconstruction",
         "Approx_Avg_Temp",
+        "ADT_Current",
     ]
 
     model_df = data.dropna(subset=feature_cols + ["Bridge Health Index (Overall)"]).copy()
@@ -484,11 +672,13 @@ def build_forecast_execution_explanation(
     bridge_hist: pd.DataFrame,
     trained: dict,
     latest_cluster,
-    forecast_horizon: int = 20
+    forecast_horizon: int = 20,
+    deterioration_rate_used: float = None
 ):
     model_name = "StackingRegressor (RF + GB + XGB)" if trained.get("used_xgboost") else "StackingRegressor (RF + GB)"
     feature_names = trained.get("feature_cols", [])
     feature_text = ", ".join(feature_names) if feature_names else "lag-based and temporal features"
+    rate_text = f"{deterioration_rate_used:.3f}" if deterioration_rate_used is not None else f"{empirical_deterioration_rate:.3f}"
 
     steps = [
         f"Matched the user request to bridge {bridge_id}.",
@@ -496,11 +686,11 @@ def build_forecast_execution_explanation(
         f"Prepared forecasting inputs using these features: {feature_text}.",
         f"Used the trained forecasting model: {model_name}.",
         "Projected the bridge year by year recursively, meaning each predicted BHI value was fed into the next forecast step.",
-        f"Applied the project-style deterioration overlay using an empirical deterioration rate of {EMPIRICAL_DETERIORATION_RATE:.3f} BHI/year.",
-        f"Updated temperature during projection using the annual increase assumption of {TEMP_INCREASE_RATE:.4f} per year when temperature data was available.",
-        "Computed a residual-based 95% prediction interval using model residual spread.",
-        "Computed an empirical uncertainty band that increases with forecast horizon.",
-        f"Plotted the projected BHI, both uncertainty bands, and the critical threshold at BHI = {CRITICAL_BHI_THRESHOLD}."
+        f"Applied the empirical deterioration overlay using a data-derived rate of {rate_text} BHI/year.",
+        f"Projected ADT forward multiplicatively using the empirical annual growth rate of {empirical_adt_growth_rate:.6f}.",
+        f"Updated temperature during projection using the empirical annual additive change of {empirical_temp_change:.6f}.",
+        "Estimated forecast uncertainty by horizon using an empirically fitted quadratic function based on rolling forecast errors.",
+        f"Plotted the projected BHI, uncertainty bands, and the critical threshold at BHI = {CRITICAL_BHI_THRESHOLD}."
     ]
 
     explanation_text = f"""Projection execution for bridge {bridge_id}:
@@ -512,11 +702,13 @@ def build_forecast_execution_explanation(
 - Training MAE: {trained.get('training_mae', float('nan')):.2f}
 - Residual standard deviation: {trained.get('residual_std', float('nan')):.3f}
 - Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}
-- Empirical deterioration rate: {EMPIRICAL_DETERIORATION_RATE:.3f} BHI/year
-- Temperature increase assumption: {TEMP_INCREASE_RATE:.4f} per year
+- Empirical deterioration rate used: {rate_text} BHI/year
+- ADT growth rate used: {empirical_adt_growth_rate:.6f}
+- Temperature change used: {empirical_temp_change:.6f} per year
+- Uncertainty model: alpha + beta*h + gamma*h^2
 - Critical threshold: BHI = {CRITICAL_BHI_THRESHOLD}
 
-This forecast was executed using a recursive ML-based projection pipeline combined with your project-style deterioration and uncertainty overlay."""
+This forecast was executed using a recursive ML-based projection pipeline aligned with your written 20-year forecasting methodology."""
 
     return {
         "text": explanation_text,
@@ -540,18 +732,25 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
 
     trained = train_forecast_model(static_df)
     model = trained["model"]
-    residual_std = trained["residual_std"]
     training_mae = trained["training_mae"]
-
     feature_cols = trained["feature_cols"]
+
+    latest_cluster = None
+    bs = bridge_summary[bridge_summary["STRUCTURE_NUMBER_008"].astype(str) == str(matched)]
+    if not bs.empty and "Cluster" in bs.columns:
+        latest_cluster = bs["Cluster"].iloc[0]
+
+    deterioration_rate_used = empirical_deterioration_rate
+
     last_row = bridge_hist.iloc[-1].copy()
     last_year = int(last_row["Year of Data"])
     last_bhi = float(last_row["Bridge Health Index (Overall)"])
 
     future_rows = []
+    prev_pred = None
 
     for step in range(1, forecast_horizon + 1):
-        forecast_year = last_year + step
+        forecast_year = int(last_year + step)
         next_row = last_row.copy()
         next_row["Year of Data"] = forecast_year
         next_row["Years_Since_First_Observation"] = float(last_row["Years_Since_First_Observation"]) + 1
@@ -560,30 +759,38 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         next_row["BHI_t_minus_2"] = float(last_row["BHI_t_minus_1"])
         next_row["BHI_t_minus_1"] = float(last_row["Bridge Health Index (Overall)"])
         next_row["BHI_change_1yr"] = next_row["BHI_t_minus_1"] - next_row["BHI_t_minus_2"]
+
         if "Approx_Avg_Temp" in next_row.index:
-            next_row["Approx_Avg_Temp"] = float(last_row["Approx_Avg_Temp"]) + TEMP_INCREASE_RATE
+            next_row["Approx_Avg_Temp"] = float(last_row["Approx_Avg_Temp"]) + empirical_temp_change
+        if "ADT_Current" in next_row.index:
+            next_row["ADT_Current"] = float(last_row["ADT_Current"]) * (1 + empirical_adt_growth_rate)
 
         X_next = pd.DataFrame([{col: next_row[col] for col in feature_cols}])
         model_pred = float(model.predict(X_next)[0])
         model_pred = max(0.0, min(100.0, model_pred))
 
-        # Project-style deterioration overlay
-        deteriorated_pred = max(0.0, min(100.0, model_pred - EMPIRICAL_DETERIORATION_RATE * (step ** 0.9)))
+        deteriorated_pred = max(
+            0.0,
+            min(100.0, model_pred - deterioration_rate_used * step)
+        )
 
-        empirical_uncertainty = min(
-    residual_std * np.sqrt(step),
-    10 + 0.2 * step
-)
-        lower_empirical = max(0.0, deteriorated_pred - 1.96 * empirical_uncertainty)
-        upper_empirical = min(100.0, deteriorated_pred + 1.96 * empirical_uncertainty)
+        if prev_pred is not None:
+            deteriorated_pred = min(deteriorated_pred, prev_pred - 0.05)
+            deteriorated_pred = max(0.0, deteriorated_pred)
 
-        residual_pi = 1.96 * residual_std
-        lower_pi = max(0.0, deteriorated_pred - residual_pi)
-        upper_pi = min(100.0, deteriorated_pred + residual_pi)
+        prev_pred = deteriorated_pred
+
+        unc_h = uncertainty_factor(step, uncertainty_coeffs)
+        empirical_uncertainty = unc_h
+
+        lower_pi = max(0.0, deteriorated_pred - 1.96 * unc_h)
+        upper_pi = min(100.0, deteriorated_pred + 1.96 * unc_h)
+        lower_empirical = lower_pi
+        upper_empirical = upper_pi
 
         future_rows.append({
             "STRUCTURE_NUMBER_008": str(matched),
-            "Forecast Year": forecast_year,
+            "Forecast Year": int(forecast_year),
             "Model Predicted BHI": round(model_pred, 2),
             "Predicted BHI": round(deteriorated_pred, 2),
             "Empirical Uncertainty": round(empirical_uncertainty, 3),
@@ -599,18 +806,14 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
 
     forecast_df = pd.DataFrame(future_rows)
 
-    latest_cluster = None
-    bs = bridge_summary[bridge_summary["STRUCTURE_NUMBER_008"].astype(str) == str(matched)]
-    if not bs.empty and "Cluster" in bs.columns:
-        latest_cluster = bs["Cluster"].iloc[0]
-
     model_name = "StackingRegressor (RF + GB + XGB)" if trained["used_xgboost"] else "StackingRegressor (RF + GB)"
     execution_info = build_forecast_execution_explanation(
         bridge_id=str(matched),
         bridge_hist=bridge_hist,
         trained=trained,
         latest_cluster=latest_cluster,
-        forecast_horizon=forecast_horizon
+        forecast_horizon=forecast_horizon,
+        deterioration_rate_used=deterioration_rate_used
     )
     summary_text = (
         f"20-year forecast for bridge {matched}:\n\n"
@@ -618,11 +821,12 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         f"- Last observed year: {last_year}\n"
         f"- Last observed overall BHI: {last_bhi:.2f}\n"
         f"- Forecast methodology: {model_name} + empirical deterioration overlay\n"
-        f"- Empirical deterioration rate: {EMPIRICAL_DETERIORATION_RATE:.3f} BHI/year\n"
+        f"- Empirical deterioration rate used: {deterioration_rate_used:.3f} BHI/year\n"
+        f"- Empirical ADT growth rate used: {empirical_adt_growth_rate:.6f}\n"
+        f"- Empirical temperature change used: {empirical_temp_change:.6f} per year\n"
         f"- Training MAE: {training_mae:.2f}\n"
-        f"- Residual std: {residual_std:.3f}\n"
         f"- Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}\n\n"
-        f"The table and plot show project-style projected BHI values for the next {forecast_horizon} years, including a residual 95% prediction interval, an empirical uncertainty band, and the critical threshold at BHI = {CRITICAL_BHI_THRESHOLD}."
+        f"The table and plot show projected BHI values for the next {forecast_horizon} years using dynamic yearly updates, empirical deterioration, and horizon-based uncertainty intervals."
     )
 
     return {
@@ -684,10 +888,15 @@ years_available = analysis["years"]
 cluster_sizes = analysis["cluster_sizes"]
 preprocessing_summary = analysis["preprocessing_summary"]
 
+empirical_deterioration_rate = compute_empirical_deterioration_rate(static_df)
+empirical_adt_growth_rate = compute_empirical_adt_growth_rate(static_df)
+empirical_temp_change = compute_empirical_temperature_change(static_df)
+
 bridge_ids = sorted(pivot_df.index.astype(str).tolist())
 
 with st.spinner("Training forecast model at startup for faster forecast responses..."):
     forecast_artifacts = train_forecast_model(static_df)
+    uncertainty_coeffs = fit_uncertainty_curve(static_df)
 
 # ---------------------------
 # Session state init
