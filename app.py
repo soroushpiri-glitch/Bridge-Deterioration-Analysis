@@ -648,13 +648,13 @@ def make_bridge_forecast_figure(bridge_id: str, forecast_df: pd.DataFrame):
     low_emp = forecast_df["Lower Empirical"].values
     up_emp = forecast_df["Upper Empirical"].values
 
-   ax.plot(years, pred, color="blue", linewidth=2, label="Predicted BHI (Deteriorated)")
-ax.fill_between(years, low_pi, up_pi, color="lightgreen", alpha=0.6, label="95% PI (Residual)")
-ax.fill_between(years, low_emp, up_emp, color="gold", alpha=0.35, label="Uncertainty Interval (Empirical)")
-ax.axhline(CRITICAL_BHI_THRESHOLD, color="red", linestyle="--", linewidth=1.8, label=f"Critical Threshold (BHI={CRITICAL_BHI_THRESHOLD})")
+    ax.plot(years, pred, color="blue", linewidth=2, label="Predicted BHI (Deteriorated)")
+    ax.fill_between(years, low_pi, up_pi, color="lightgreen", alpha=0.6, label="95% PI (Residual)")
+    ax.fill_between(years, low_emp, up_emp, color="gold", alpha=0.35, label="Uncertainty Interval (Empirical)")
+    ax.axhline(CRITICAL_BHI_THRESHOLD, color="red", linestyle="--", linewidth=1.8, label=f"Critical Threshold (BHI={CRITICAL_BHI_THRESHOLD})")
 
-import matplotlib.ticker as mticker
-ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    import matplotlib.ticker as mticker
+    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
     ax.text(years[-1] - 1.3, pred[-1] + 0.2, f"BHI={pred[-1]:.1f}", color="navy", fontsize=9)
 
