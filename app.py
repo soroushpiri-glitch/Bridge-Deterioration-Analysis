@@ -14,6 +14,8 @@ from sklearn.cluster import KMeans
 from scipy.stats import linregress
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error
 
 # ---------------------------
 # Config
@@ -256,6 +258,246 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
     }
 
 # ---------------------------
+# Forecast preparation + model
+# ---------------------------
+@st.cache_data
+def prepare_forecast_data(static_df: pd.DataFrame):
+    df = static_df.copy()
+    df.columns = df.columns.str.strip()
+
+    required_cols = [
+        "Year of Data",
+        "STRUCTURE_NUMBER_008",
+        "Bridge Health Index (Overall)"
+    ]
+    missing_cols = [c for c in required_cols if c not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Forecast data is missing required columns: {missing_cols}")
+
+    df = df[required_cols].copy()
+    df["Year of Data"] = pd.to_numeric(df["Year of Data"], errors="coerce")
+    df["Bridge Health Index (Overall)"] = pd.to_numeric(
+        df["Bridge Health Index (Overall)"], errors="coerce"
+    )
+    df = df.dropna(subset=required_cols)
+    df["Year of Data"] = df["Year of Data"].astype(int)
+
+    df = df.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"]).copy()
+
+    # Lag and simple trend features
+    df["BHI_t_minus_1"] = df.groupby("STRUCTURE_NUMBER_008")["Bridge Health Index (Overall)"].shift(1)
+    df["BHI_t_minus_2"] = df.groupby("STRUCTURE_NUMBER_008")["Bridge Health Index (Overall)"].shift(2)
+    df["BHI_change_1yr"] = df["BHI_t_minus_1"] - df["BHI_t_minus_2"]
+
+    # Bridge age proxy inside each bridge record history
+    first_year = df.groupby("STRUCTURE_NUMBER_008")["Year of Data"].transform("min")
+    df["Years_Since_First_Observation"] = df["Year of Data"] - first_year
+
+    model_df = df.dropna(subset=[
+        "BHI_t_minus_1", "BHI_t_minus_2", "BHI_change_1yr", "Years_Since_First_Observation"
+    ]).copy()
+
+    feature_cols = [
+        "Year of Data",
+        "BHI_t_minus_1",
+        "BHI_t_minus_2",
+        "BHI_change_1yr",
+        "Years_Since_First_Observation"
+    ]
+    target_col = "Bridge Health Index (Overall)"
+
+    return model_df, feature_cols, target_col
+
+
+@st.cache_resource
+def train_forecast_model(static_df: pd.DataFrame):
+    model_df, feature_cols, target_col = prepare_forecast_data(static_df)
+
+    if model_df.empty:
+        raise ValueError("No valid rows available to train the forecast model.")
+
+    X = model_df[feature_cols].copy()
+    y = model_df[target_col].copy()
+
+    model = RandomForestRegressor(
+        n_estimators=300,
+        max_depth=10,
+        min_samples_leaf=2,
+        random_state=42,
+        n_jobs=-1
+    )
+    model.fit(X, y)
+
+    preds = model.predict(X)
+    mae = mean_absolute_error(y, preds)
+
+    return {
+        "model": model,
+        "feature_cols": feature_cols,
+        "training_mae": float(mae),
+        "training_rows": int(len(model_df))
+    }
+
+
+def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
+    matched = find_best_bridge_match(bridge_id)
+    if matched is None:
+        return {
+            "text": f"I could not find a matching bridge for '{bridge_id}'."
+        }
+
+    raw = static_df.copy()
+    raw.columns = raw.columns.str.strip()
+
+    needed = ["STRUCTURE_NUMBER_008", "Year of Data", "Bridge Health Index (Overall)"]
+    if any(c not in raw.columns for c in needed):
+        return {
+            "text": "The dataset does not contain the columns needed for forecasting."
+        }
+
+    raw = raw[needed].copy()
+    raw["Year of Data"] = pd.to_numeric(raw["Year of Data"], errors="coerce")
+    raw["Bridge Health Index (Overall)"] = pd.to_numeric(
+        raw["Bridge Health Index (Overall)"], errors="coerce"
+    )
+    raw = raw.dropna(subset=needed)
+    raw["Year of Data"] = raw["Year of Data"].astype(int)
+
+    bridge_hist = raw[raw["STRUCTURE_NUMBER_008"].astype(str) == str(matched)].copy()
+    bridge_hist = bridge_hist.sort_values("Year of Data")
+
+    if len(bridge_hist) < 3:
+        return {
+            "text": f"Bridge {matched} does not have enough history for a 20-year forecast. At least 3 yearly observations are needed."
+        }
+
+    trained = train_forecast_model(static_df)
+    model = trained["model"]
+    training_mae = trained["training_mae"]
+
+    history_years = bridge_hist["Year of Data"].tolist()
+    history_bhi = bridge_hist["Bridge Health Index (Overall)"].tolist()
+
+    last_year = int(history_years[-1])
+    last_bhi = float(history_bhi[-1])
+    prev_bhi = float(history_bhi[-2])
+
+    first_year = int(history_years[0])
+
+    forecast_rows = []
+    rolling_prev2 = prev_bhi
+    rolling_prev1 = last_bhi
+
+    for step in range(1, forecast_horizon + 1):
+        forecast_year = last_year + step
+        years_since_first = forecast_year - first_year
+        bhi_change_1yr = rolling_prev1 - rolling_prev2
+
+        X_next = pd.DataFrame([{
+            "Year of Data": forecast_year,
+            "BHI_t_minus_1": rolling_prev1,
+            "BHI_t_minus_2": rolling_prev2,
+            "BHI_change_1yr": bhi_change_1yr,
+            "Years_Since_First_Observation": years_since_first
+        }])
+
+        pred = float(model.predict(X_next)[0])
+
+        # keep predictions within a valid BHI-like range
+        pred = max(0.0, min(100.0, pred))
+
+        lower = max(0.0, pred - 1.96 * training_mae)
+        upper = min(100.0, pred + 1.96 * training_mae)
+
+        forecast_rows.append({
+            "STRUCTURE_NUMBER_008": matched,
+            "Forecast Year": forecast_year,
+            "Predicted BHI": round(pred, 2),
+            "Lower 95% PI": round(lower, 2),
+            "Upper 95% PI": round(upper, 2)
+        })
+
+        rolling_prev2 = rolling_prev1
+        rolling_prev1 = pred
+
+    forecast_df = pd.DataFrame(forecast_rows)
+
+    latest_cluster = None
+    bs = bridge_summary[bridge_summary["STRUCTURE_NUMBER_008"].astype(str) == str(matched)]
+    if not bs.empty and "Cluster" in bs.columns:
+        latest_cluster = bs["Cluster"].iloc[0]
+
+    summary_text = (
+        f"20-year forecast for bridge {matched}:\n\n"
+        f"- Historical records used: {len(bridge_hist)}\n"
+        f"- Last observed year: {last_year}\n"
+        f"- Last observed overall BHI: {last_bhi:.2f}\n"
+        f"- Training MAE of forecast model: {training_mae:.2f}\n"
+        f"- Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}\n\n"
+        f"The table shows projected BHI values for the next {forecast_horizon} years."
+    )
+
+    return {
+        "text": summary_text,
+        "analysis_df": forecast_df,
+        "bridge_ids": [matched],
+        "label": "bridge_20yr_forecast"
+    }
+
+
+def make_bridge_forecast_figure(bridge_id: str, forecast_df: pd.DataFrame):
+    matched = find_best_bridge_match(bridge_id)
+    if matched is None or forecast_df is None or forecast_df.empty:
+        return None
+
+    hist = static_df.copy()
+    hist = hist[[
+        "STRUCTURE_NUMBER_008",
+        "Year of Data",
+        "Bridge Health Index (Overall)"
+    ]].copy()
+    hist["Year of Data"] = pd.to_numeric(hist["Year of Data"], errors="coerce")
+    hist["Bridge Health Index (Overall)"] = pd.to_numeric(
+        hist["Bridge Health Index (Overall)"], errors="coerce"
+    )
+    hist = hist.dropna()
+    hist = hist[hist["STRUCTURE_NUMBER_008"].astype(str) == str(matched)].sort_values("Year of Data")
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    ax.plot(
+        hist["Year of Data"].values,
+        hist["Bridge Health Index (Overall)"].values,
+        marker="o",
+        label="Historical BHI"
+    )
+
+    ax.plot(
+        forecast_df["Forecast Year"].values,
+        forecast_df["Predicted BHI"].values,
+        marker="o",
+        linestyle="--",
+        label="Forecasted BHI"
+    )
+
+    ax.fill_between(
+        forecast_df["Forecast Year"].values,
+        forecast_df["Lower 95% PI"].values,
+        forecast_df["Upper 95% PI"].values,
+        alpha=0.2,
+        label="95% prediction interval"
+    )
+
+    ax.set_title(f"20-Year BHI Forecast for Bridge {matched}")
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Bridge Health Index (Overall)")
+    ax.set_ylim(0, 100)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    return fig
+
+# ---------------------------
 # Run pipeline
 # ---------------------------
 static_df = load_data()
@@ -270,6 +512,7 @@ cluster_sizes = analysis["cluster_sizes"]
 preprocessing_summary = analysis["preprocessing_summary"]
 
 bridge_ids = sorted(pivot_df.index.astype(str).tolist())
+forecast_artifacts = train_forecast_model(static_df)
 
 # ---------------------------
 # Session state init
@@ -321,7 +564,28 @@ def find_best_bridge_match(bridge_id: str):
 
     return None
 
+def is_forecast_question(question: str):
+    q = question.lower().strip()
+    phrases = [
+        "forecast",
+        "predict",
+        "projection",
+        "20 year projection",
+        "20-year projection",
+        "20 year forecast",
+        "20-year forecast"
+    ]
+    return any(p in q for p in phrases)
 
+
+def extract_bridge_id_from_question(question: str):
+    candidates = re.findall(r"[A-Za-z0-9\-]+", question)
+    for token in candidates:
+        matched = find_best_bridge_match(token)
+        if matched is not None:
+            return matched
+    return None
+    
 def extract_top_n(user_query, default=5):
     patterns = [
         r"top\s+(\d+)",
@@ -2260,6 +2524,27 @@ def route_question(question: str):
     q = question.lower().strip()
     cluster_ids_local = extract_cluster_ids(q)
 
+    # ---------------------------
+    # Forecast routing
+    # ---------------------------
+    if is_forecast_question(question):
+        bridge_id = extract_bridge_id_from_question(question)
+        if bridge_id is None:
+            return {
+                "mode": "direct_text",
+                "text": "Please include a bridge ID for forecasting, for example: Forecast bridge 200000P-0188010 for the next 20 years."
+            }
+
+        result = forecast_bridge_20_years(bridge_id, forecast_horizon=20)
+
+        if "analysis_df" in result and result.get("analysis_df") is not None and not result["analysis_df"].empty:
+            result["figure"] = make_bridge_forecast_figure(bridge_id, result["analysis_df"])
+
+        return {
+            "mode": "direct_result",
+            "result": result
+        }
+
     if (
         len(cluster_ids_local) == 1 and
         any(phrase in q for phrase in [
@@ -2389,7 +2674,6 @@ def route_question(question: str):
         }
 
     return {"mode": "bedrock"}
-
 
 def get_tool_config():
     return {
