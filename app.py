@@ -686,10 +686,10 @@ def build_forecast_execution_explanation(
         f"Prepared forecasting inputs using these features: {feature_text}.",
         f"Used the trained forecasting model: {model_name}.",
         "Projected the bridge year by year recursively, meaning each predicted BHI value was fed into the next forecast step.",
-        f"Applied the empirical deterioration overlay using a data-derived rate of {rate_text} BHI/year.",
+        f"Applied a bridge-specific deterioration overlay using a data-derived rate of {rate_text} BHI/year.",
         f"Projected ADT forward multiplicatively using the empirical annual growth rate of {empirical_adt_growth_rate:.6f}.",
         f"Updated temperature during projection using the empirical annual additive change of {empirical_temp_change:.6f}.",
-        "Estimated forecast uncertainty by horizon using an empirically fitted quadratic function based on rolling forecast errors.",
+        "Estimated forecast uncertainty by horizon using an empirically fitted quadratic function based on rolling forecast errors and enforced nondecreasing uncertainty over time.",
         f"Plotted the projected BHI, uncertainty bands, and the critical threshold at BHI = {CRITICAL_BHI_THRESHOLD}."
     ]
 
@@ -702,10 +702,10 @@ def build_forecast_execution_explanation(
 - Training MAE: {trained.get('training_mae', float('nan')):.2f}
 - Residual standard deviation: {trained.get('residual_std', float('nan')):.3f}
 - Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}
-- Empirical deterioration rate used: {rate_text} BHI/year
+- Bridge-specific deterioration rate used: {rate_text} BHI/year
 - ADT growth rate used: {empirical_adt_growth_rate:.6f}
 - Temperature change used: {empirical_temp_change:.6f} per year
-- Uncertainty model: alpha + beta*h + gamma*h^2
+- Uncertainty model: alpha + beta*h + gamma*h^2 with nondecreasing horizon enforcement
 - Critical threshold: BHI = {CRITICAL_BHI_THRESHOLD}
 
 This forecast was executed using a recursive ML-based projection pipeline aligned with your written 20-year forecasting methodology."""
@@ -741,6 +741,11 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         latest_cluster = bs["Cluster"].iloc[0]
 
     deterioration_rate_used = empirical_deterioration_rate
+    bridge_specific_slope = np.nan
+    if not bs.empty and "deterioration_slope_per_year" in bs.columns:
+        bridge_specific_slope = pd.to_numeric(bs["deterioration_slope_per_year"], errors="coerce").iloc[0]
+    if pd.notna(bridge_specific_slope) and bridge_specific_slope < 0:
+        deterioration_rate_used = abs(float(bridge_specific_slope))
 
     last_row = bridge_hist.iloc[-1].copy()
     last_year = int(last_row["Year of Data"])
@@ -748,6 +753,7 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
 
     future_rows = []
     prev_pred = None
+    prev_unc_h = 0.0
 
     for step in range(1, forecast_horizon + 1):
         forecast_year = int(last_year + step)
@@ -769,7 +775,7 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         model_pred = float(model.predict(X_next)[0])
         model_pred = max(0.0, min(100.0, model_pred))
 
-        deteriorated_pred = max(0.0, min(100.0, model_pred))
+        deteriorated_pred = max(0.0, min(100.0, model_pred - deterioration_rate_used * step))
 
         if prev_pred is not None:
             deteriorated_pred = min(deteriorated_pred, prev_pred - 0.05)
@@ -777,7 +783,8 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
 
         prev_pred = deteriorated_pred
 
-        unc_h = uncertainty_factor(step, uncertainty_coeffs)
+        unc_h = max(prev_unc_h, uncertainty_factor(step, uncertainty_coeffs))
+        prev_unc_h = unc_h
         empirical_uncertainty = unc_h
 
         lower_pi = max(0.0, deteriorated_pred - 1.96 * unc_h)
@@ -818,12 +825,12 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         f"- Last observed year: {last_year}\n"
         f"- Last observed overall BHI: {last_bhi:.2f}\n"
         f"- Forecast methodology: {model_name} + empirical deterioration overlay\n"
-        f"- Empirical deterioration rate used: {deterioration_rate_used:.3f} BHI/year\n"
+        f"- Bridge-specific deterioration rate used: {deterioration_rate_used:.3f} BHI/year\n"
         f"- Empirical ADT growth rate used: {empirical_adt_growth_rate:.6f}\n"
         f"- Empirical temperature change used: {empirical_temp_change:.6f} per year\n"
         f"- Training MAE: {training_mae:.2f}\n"
         f"- Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}\n\n"
-        f"The table and plot show projected BHI values for the next {forecast_horizon} years using dynamic yearly updates, empirical deterioration, and horizon-based uncertainty intervals."
+        f"The table and plot show projected BHI values for the next {forecast_horizon} years using dynamic yearly updates, bridge-specific deterioration, and horizon-based uncertainty intervals."
     )
 
     return {
