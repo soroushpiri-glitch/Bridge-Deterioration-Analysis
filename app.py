@@ -769,10 +769,7 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         model_pred = float(model.predict(X_next)[0])
         model_pred = max(0.0, min(100.0, model_pred))
 
-        deteriorated_pred = max(
-            0.0,
-            min(100.0, model_pred - deterioration_rate_used * step)
-        )
+       deteriorated_pred = max(0.0, min(100.0, model_pred))
 
         if prev_pred is not None:
             deteriorated_pred = min(deteriorated_pred, prev_pred - 0.05)
