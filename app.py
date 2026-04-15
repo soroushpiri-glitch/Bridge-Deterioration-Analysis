@@ -387,7 +387,7 @@ def train_forecast_model(static_df: pd.DataFrame):
     y = model_df[target_col].copy()
 
     rf = RandomForestRegressor(
-        n_estimators=300,
+        n_estimators=100,
         max_depth=12,
         min_samples_leaf=2,
         random_state=42,
@@ -398,7 +398,7 @@ def train_forecast_model(static_df: pd.DataFrame):
     estimators = [("rf", rf), ("gb", gb)]
     if XGBOOST_AVAILABLE:
         xgb = XGBRegressor(
-            n_estimators=300,
+            n_estimators=100,
             max_depth=6,
             learning_rate=0.05,
             subsample=0.9,
@@ -589,6 +589,9 @@ cluster_sizes = analysis["cluster_sizes"]
 preprocessing_summary = analysis["preprocessing_summary"]
 
 bridge_ids = sorted(pivot_df.index.astype(str).tolist())
+
+with st.spinner("Training forecast model at startup for faster forecast responses..."):
+    forecast_artifacts = train_forecast_model(static_df)
 
 # ---------------------------
 # Session state init
