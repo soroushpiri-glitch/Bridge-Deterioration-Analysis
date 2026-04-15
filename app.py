@@ -3698,11 +3698,12 @@ def answer_question(question):
         st.session_state.pending_compare_cluster = None
         result = execute_tool(routed["tool_name"], routed["tool_input"])
 
-        fig = None
-        if result.get("show_cluster_chart"):
-            fig = make_cluster_median_figure(result["cluster_id"])
-        elif result.get("show_compare_clusters_chart"):
-            fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
+        fig = result.get("figure")
+        if fig is None:
+            if result.get("show_cluster_chart"):
+                fig = make_cluster_median_figure(result["cluster_id"])
+            elif result.get("show_compare_clusters_chart"):
+                fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
 
         return {
             "text": result.get("text"),
