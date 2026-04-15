@@ -460,6 +460,83 @@ def extract_bridge_id_from_question(question: str):
     return None
 
 
+def is_forecast_explanation_question(question: str):
+    q = question.lower().strip()
+    phrases = [
+        "how is this projection executed",
+        "how was this projection executed",
+        "how is this forecast executed",
+        "how was this forecast executed",
+        "how did you do this forecast",
+        "how did you calculate this forecast",
+        "how did you calculate this projection",
+        "explain this forecast",
+        "explain this projection",
+        "what methodology did you use",
+        "how was this projection calculated",
+        "how was this forecast calculated"
+    ]
+    return any(p in q for p in phrases)
+
+
+def build_forecast_execution_explanation(
+    bridge_id: str,
+    bridge_hist: pd.DataFrame,
+    trained: dict,
+    latest_cluster,
+    forecast_horizon: int = 20
+):
+    model_name = "StackingRegressor (RF + GB + XGB)" if trained.get("used_xgboost") else "StackingRegressor (RF + GB)"
+    feature_names = trained.get("feature_cols", [])
+    feature_text = ", ".join(feature_names) if feature_names else "lag-based and temporal features"
+
+    steps = [
+        f"Matched the user request to bridge {bridge_id}.",
+        f"Loaded {len(bridge_hist)} historical yearly records for this bridge and sorted them by year.",
+        f"Prepared forecasting inputs using these features: {feature_text}.",
+        f"Used the trained forecasting model: {model_name}.",
+        "Projected the bridge year by year recursively, meaning each predicted BHI value was fed into the next forecast step.",
+        f"Applied the project-style deterioration overlay using an empirical deterioration rate of {EMPIRICAL_DETERIORATION_RATE:.3f} BHI/year.",
+        f"Updated temperature during projection using the annual increase assumption of {TEMP_INCREASE_RATE:.4f} per year when temperature data was available.",
+        "Computed a residual-based 95% prediction interval using model residual spread.",
+        "Computed an empirical uncertainty band that increases with forecast horizon.",
+        f"Plotted the projected BHI, both uncertainty bands, and the critical threshold at BHI = {CRITICAL_BHI_THRESHOLD}."
+    ]
+
+    explanation_text = (
+        f"Projection execution for bridge {bridge_id}:
+
+"
+        f"- Historical records used: {len(bridge_hist)}
+"
+        f"- Forecast horizon: {forecast_horizon} years
+"
+        f"- Model used: {model_name}
+"
+        f"- Features used: {feature_text}
+"
+        f"- Training MAE: {trained.get('training_mae', float('nan')):.2f}
+"
+        f"- Residual standard deviation: {trained.get('residual_std', float('nan')):.3f}
+"
+        f"- Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}
+"
+        f"- Empirical deterioration rate: {EMPIRICAL_DETERIORATION_RATE:.3f} BHI/year
+"
+        f"- Temperature increase assumption: {TEMP_INCREASE_RATE:.4f} per year
+"
+        f"- Critical threshold: BHI = {CRITICAL_BHI_THRESHOLD}
+
+"
+        f"This forecast was executed using a recursive ML-based projection pipeline combined with your project-style deterioration and uncertainty overlay."
+    )
+
+    return {
+        "text": explanation_text,
+        "execution_steps": steps
+    }
+
+
 def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
     matched = find_best_bridge_match(bridge_id)
     if matched is None:
@@ -538,6 +615,13 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         latest_cluster = bs["Cluster"].iloc[0]
 
     model_name = "StackingRegressor (RF + GB + XGB)" if trained["used_xgboost"] else "StackingRegressor (RF + GB)"
+    execution_info = build_forecast_execution_explanation(
+        bridge_id=str(matched),
+        bridge_hist=bridge_hist,
+        trained=trained,
+        latest_cluster=latest_cluster,
+        forecast_horizon=forecast_horizon
+    )
     summary_text = (
         f"20-year forecast for bridge {matched}:\n\n"
         f"- Historical records used: {len(bridge_hist)}\n"
@@ -556,7 +640,9 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         "analysis_df": forecast_df,
         "bridge_ids": [str(matched)],
         "label": "bridge_20yr_forecast",
-        "figure": make_bridge_forecast_figure(str(matched), forecast_df)
+        "figure": make_bridge_forecast_figure(str(matched), forecast_df),
+        "forecast_explanation": execution_info["text"],
+        "execution_steps": execution_info["execution_steps"]
     }
 
 
@@ -634,6 +720,9 @@ def initialize_session_state():
             "result_type": None,
             "question": None
         }
+
+    if "last_forecast_result" not in st.session_state:
+        st.session_state.last_forecast_result = None
 
 initialize_session_state()
 
@@ -2555,6 +2644,11 @@ def route_question(question: str):
     q = question.lower().strip()
     cluster_ids_local = extract_cluster_ids(q)
 
+    if is_forecast_explanation_question(question):
+        return {
+            "mode": "forecast_explanation"
+        }
+
     if is_forecast_question(question):
         bridge_id = extract_bridge_id_from_question(question)
         if bridge_id is None:
@@ -3610,7 +3704,8 @@ def answer_question(question):
             "stdout": result.get("stdout"),
             "bridge_ids": result.get("bridge_ids"),
             "cluster_ids": result.get("cluster_ids"),
-            "label": result.get("label")
+            "label": result.get("label"),
+            "forecast_explanation": result.get("forecast_explanation")
         }
 
     # 2) Existing cluster pending compare
@@ -3630,6 +3725,13 @@ def answer_question(question):
         fig = None
         if result.get("show_compare_clusters_chart"):
             fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
+
+        if result.get("label") == "bridge_20yr_forecast":
+            st.session_state.last_forecast_result = {
+                "forecast_explanation": result.get("forecast_explanation"),
+                "execution_steps": result.get("execution_steps"),
+                "bridge_ids": result.get("bridge_ids")
+            }
 
         return {
             "text": result.get("text"),
@@ -3653,6 +3755,48 @@ def answer_question(question):
 
     # 3) Direct routing
     routed = route_question(question)
+
+    if routed["mode"] == "forecast_explanation":
+        last_forecast = st.session_state.get("last_forecast_result")
+        if last_forecast:
+            return {
+                "text": last_forecast.get("forecast_explanation", "No saved forecast explanation is available."),
+                "figure": None,
+                "summary_df": None,
+                "cluster_df": None,
+                "pc1_table": None,
+                "schema_df": None,
+                "column_df": None,
+                "values_df": None,
+                "preview_df": None,
+                "browse_df": None,
+                "analysis_df": None,
+                "generated_code": None,
+                "execution_steps": last_forecast.get("execution_steps", []),
+                "stdout": None,
+                "bridge_ids": last_forecast.get("bridge_ids"),
+                "cluster_ids": None,
+                "label": "forecast_explanation"
+            }
+        return {
+            "text": "Please run a forecast first, then I can explain how that projection was executed.",
+            "figure": None,
+            "summary_df": None,
+            "cluster_df": None,
+            "pc1_table": None,
+            "schema_df": None,
+            "column_df": None,
+            "values_df": None,
+            "preview_df": None,
+            "browse_df": None,
+            "analysis_df": None,
+            "generated_code": None,
+            "execution_steps": None,
+            "stdout": None,
+            "bridge_ids": None,
+            "cluster_ids": None,
+            "label": "forecast_explanation"
+        }
 
     if routed["mode"] == "direct_text":
         st.session_state.pending_compare_cluster = routed.get("pending_compare_cluster")
@@ -3830,6 +3974,10 @@ for idx, message in enumerate(st.session_state.messages):
             st.subheader("Analysis Results")
             st.dataframe(pd.DataFrame(message["analysis_df"]), use_container_width=True)
 
+        if "forecast_explanation" in message and message["forecast_explanation"] is not None:
+            st.subheader("Forecast Execution Summary")
+            st.write(message["forecast_explanation"])
+
         if "execution_steps" in message and message["execution_steps"] is not None:
             with st.expander("Analysis Steps"):
                 for step in message["execution_steps"]:
@@ -3893,6 +4041,9 @@ if user_prompt:
     if result.get("analysis_df") is not None:
         assistant_message["analysis_df"] = result["analysis_df"].to_dict(orient="records")
 
+    if result.get("forecast_explanation") is not None:
+        assistant_message["forecast_explanation"] = result["forecast_explanation"]
+
     if result.get("generated_code") is not None:
         assistant_message["generated_code"] = result["generated_code"]
 
@@ -3953,6 +4104,10 @@ if user_prompt:
         if result.get("analysis_df") is not None:
             st.subheader("Analysis Results")
             st.dataframe(result["analysis_df"], use_container_width=True)
+
+        if result.get("forecast_explanation") is not None:
+            st.subheader("Forecast Execution Summary")
+            st.write(result["forecast_explanation"])
 
         if result.get("execution_steps") is not None:
             with st.expander("Analysis Steps"):
