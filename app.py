@@ -14,8 +14,16 @@ from sklearn.cluster import KMeans
 from scipy.stats import linregress
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, StackingRegressor
+from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error
+
+try:
+    from xgboost import XGBRegressor
+    XGBOOST_AVAILABLE = True
+except Exception:
+    XGBRegressor = None
+    XGBOOST_AVAILABLE = False
 
 # ---------------------------
 # Config
@@ -258,54 +266,113 @@ def prepare_analysis(static_df, n_clusters=N_CLUSTERS):
     }
 
 # ---------------------------
-# Forecast preparation + model
+# Forecast methodology
 # ---------------------------
-@st.cache_data
-def prepare_forecast_data(static_df: pd.DataFrame):
-    df = static_df.copy()
-    df.columns = df.columns.str.strip()
+def _find_optional_column(df, candidates=None, contains=None):
+    cols = list(df.columns)
+    if candidates:
+        lowered = {c.lower(): c for c in cols}
+        for cand in candidates:
+            if cand.lower() in lowered:
+                return lowered[cand.lower()]
+    if contains:
+        for col in cols:
+            col_low = col.lower()
+            if all(term.lower() in col_low for term in contains):
+                return col
+    return None
+
+
+def _prepare_bridge_forecast_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    data = df.copy()
+    data.columns = data.columns.str.strip()
 
     required_cols = [
         "Year of Data",
         "STRUCTURE_NUMBER_008",
         "Bridge Health Index (Overall)"
     ]
-    missing_cols = [c for c in required_cols if c not in df.columns]
+    missing_cols = [c for c in required_cols if c not in data.columns]
     if missing_cols:
         raise ValueError(f"Forecast data is missing required columns: {missing_cols}")
 
-    df = df[required_cols].copy()
-    df["Year of Data"] = pd.to_numeric(df["Year of Data"], errors="coerce")
-    df["Bridge Health Index (Overall)"] = pd.to_numeric(
-        df["Bridge Health Index (Overall)"], errors="coerce"
+    data["Year of Data"] = pd.to_numeric(data["Year of Data"], errors="coerce")
+    data["Bridge Health Index (Overall)"] = pd.to_numeric(
+        data["Bridge Health Index (Overall)"], errors="coerce"
     )
-    df = df.dropna(subset=required_cols)
-    df["Year of Data"] = df["Year of Data"].astype(int)
+    data = data.dropna(subset=required_cols).copy()
+    data["Year of Data"] = data["Year of Data"].astype(int)
+    data["STRUCTURE_NUMBER_008"] = data["STRUCTURE_NUMBER_008"].astype(str).str.strip()
 
-    df = df.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"]).copy()
+    year_built_col = _find_optional_column(data, candidates=["YEAR_BUILT_027", "Year Built"])
+    recon_col = _find_optional_column(
+        data,
+        candidates=["YEAR_OF_LAST_RECONSTRUCTION", "LAST_RECONSTRUCTION_YEAR"],
+        contains=["reconstruction", "year"]
+    )
+    if recon_col is None:
+        recon_col = _find_optional_column(data, contains=["improvement", "year"])
+    temp_col = _find_optional_column(
+        data,
+        candidates=["Approx_Avg_Temp", "AVG_TEMP", "MEAN_TEMP"],
+        contains=["temp"]
+    )
 
-    # Lag and simple trend features
-    df["BHI_t_minus_1"] = df.groupby("STRUCTURE_NUMBER_008")["Bridge Health Index (Overall)"].shift(1)
-    df["BHI_t_minus_2"] = df.groupby("STRUCTURE_NUMBER_008")["Bridge Health Index (Overall)"].shift(2)
-    df["BHI_change_1yr"] = df["BHI_t_minus_1"] - df["BHI_t_minus_2"]
+    for col in [year_built_col, recon_col, temp_col]:
+        if col is not None:
+            data[col] = pd.to_numeric(data[col], errors="coerce")
 
-    # Bridge age proxy inside each bridge record history
-    first_year = df.groupby("STRUCTURE_NUMBER_008")["Year of Data"].transform("min")
-    df["Years_Since_First_Observation"] = df["Year of Data"] - first_year
+    data = data.sort_values(["STRUCTURE_NUMBER_008", "Year of Data"]).copy()
 
-    model_df = df.dropna(subset=[
-        "BHI_t_minus_1", "BHI_t_minus_2", "BHI_change_1yr", "Years_Since_First_Observation"
-    ]).copy()
+    data["BHI_t_minus_1"] = data.groupby("STRUCTURE_NUMBER_008")["Bridge Health Index (Overall)"].shift(1)
+    data["BHI_t_minus_2"] = data.groupby("STRUCTURE_NUMBER_008")["Bridge Health Index (Overall)"].shift(2)
+    data["BHI_change_1yr"] = data["BHI_t_minus_1"] - data["BHI_t_minus_2"]
+
+    first_year = data.groupby("STRUCTURE_NUMBER_008")["Year of Data"].transform("min")
+    data["Years_Since_First_Observation"] = data["Year of Data"] - first_year
+
+    if year_built_col is not None:
+        data["Bridge_Age"] = data["Year of Data"] - data[year_built_col]
+        data.loc[(data["Bridge_Age"] < 0) | (data["Bridge_Age"] > 300), "Bridge_Age"] = np.nan
+    else:
+        data["Bridge_Age"] = data["Years_Since_First_Observation"]
+
+    if recon_col is not None:
+        data["Time_Since_Last_Reconstruction"] = data["Year of Data"] - data[recon_col]
+        data.loc[(data["Time_Since_Last_Reconstruction"] < 0) | (data["Time_Since_Last_Reconstruction"] > 300), "Time_Since_Last_Reconstruction"] = np.nan
+    else:
+        data["Time_Since_Last_Reconstruction"] = data["Years_Since_First_Observation"]
+
+    if temp_col is not None:
+        data["Approx_Avg_Temp"] = data[temp_col]
+    else:
+        data["Approx_Avg_Temp"] = 0.0
+
+    for col in ["Bridge_Age", "Time_Since_Last_Reconstruction", "Approx_Avg_Temp"]:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+        data[col] = data.groupby("STRUCTURE_NUMBER_008")[col].transform(lambda s: s.ffill().bfill())
+        data[col] = data[col].fillna(0)
+
+    return data
+
+
+@st.cache_data
+def prepare_forecast_data(static_df: pd.DataFrame):
+    data = _prepare_bridge_forecast_dataframe(static_df)
 
     feature_cols = [
         "Year of Data",
         "BHI_t_minus_1",
         "BHI_t_minus_2",
         "BHI_change_1yr",
-        "Years_Since_First_Observation"
+        "Years_Since_First_Observation",
+        "Bridge_Age",
+        "Time_Since_Last_Reconstruction",
+        "Approx_Avg_Temp",
     ]
-    target_col = "Bridge Health Index (Overall)"
 
+    model_df = data.dropna(subset=feature_cols + ["Bridge Health Index (Overall)"]).copy()
+    target_col = "Bridge Health Index (Overall)"
     return model_df, feature_cols, target_col
 
 
@@ -319,129 +386,155 @@ def train_forecast_model(static_df: pd.DataFrame):
     X = model_df[feature_cols].copy()
     y = model_df[target_col].copy()
 
-    model = RandomForestRegressor(
+    rf = RandomForestRegressor(
         n_estimators=300,
-        max_depth=10,
+        max_depth=12,
         min_samples_leaf=2,
         random_state=42,
         n_jobs=-1
     )
+    gb = GradientBoostingRegressor(random_state=42)
+
+    estimators = [("rf", rf), ("gb", gb)]
+    if XGBOOST_AVAILABLE:
+        xgb = XGBRegressor(
+            n_estimators=300,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            objective="reg:squarederror",
+            random_state=42,
+            verbosity=0
+        )
+        estimators.append(("xgb", xgb))
+
+    model = StackingRegressor(
+        estimators=estimators,
+        final_estimator=Ridge(alpha=1.0)
+    )
     model.fit(X, y)
 
     preds = model.predict(X)
+    residuals = y - preds
     mae = mean_absolute_error(y, preds)
+    residual_std = float(np.std(residuals))
 
     return {
         "model": model,
         "feature_cols": feature_cols,
         "training_mae": float(mae),
-        "training_rows": int(len(model_df))
+        "residual_std": residual_std,
+        "training_rows": int(len(model_df)),
+        "used_xgboost": bool(XGBOOST_AVAILABLE)
     }
+
+
+def is_forecast_question(question: str):
+    q = question.lower().strip()
+    phrases = [
+        "forecast",
+        "predict",
+        "projection",
+        "20 year projection",
+        "20-year projection",
+        "20 year forecast",
+        "20-year forecast"
+    ]
+    return any(p in q for p in phrases)
+
+
+
+def extract_bridge_id_from_question(question: str):
+    candidates = re.findall(r"[A-Za-z0-9\-]+", question)
+    for token in candidates:
+        matched = find_best_bridge_match(token)
+        if matched is not None:
+            return matched
+    return None
 
 
 def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
     matched = find_best_bridge_match(bridge_id)
     if matched is None:
-        return {
-            "text": f"I could not find a matching bridge for '{bridge_id}'."
-        }
+        return {"text": f"I could not find a matching bridge for '{bridge_id}'."}
 
-    raw = static_df.copy()
-    raw.columns = raw.columns.str.strip()
-
-    needed = ["STRUCTURE_NUMBER_008", "Year of Data", "Bridge Health Index (Overall)"]
-    if any(c not in raw.columns for c in needed):
-        return {
-            "text": "The dataset does not contain the columns needed for forecasting."
-        }
-
-    raw = raw[needed].copy()
-    raw["Year of Data"] = pd.to_numeric(raw["Year of Data"], errors="coerce")
-    raw["Bridge Health Index (Overall)"] = pd.to_numeric(
-        raw["Bridge Health Index (Overall)"], errors="coerce"
-    )
-    raw = raw.dropna(subset=needed)
-    raw["Year of Data"] = raw["Year of Data"].astype(int)
-
-    bridge_hist = raw[raw["STRUCTURE_NUMBER_008"].astype(str) == str(matched)].copy()
+    prepared = _prepare_bridge_forecast_dataframe(static_df)
+    bridge_hist = prepared[prepared["STRUCTURE_NUMBER_008"] == str(matched)].copy()
     bridge_hist = bridge_hist.sort_values("Year of Data")
 
-    if len(bridge_hist) < 3:
+    if len(bridge_hist) < 5:
         return {
-            "text": f"Bridge {matched} does not have enough history for a 20-year forecast. At least 3 yearly observations are needed."
+            "text": f"Bridge {matched} does not have enough history for a 20-year forecast. At least 5 yearly observations are needed."
         }
 
     trained = train_forecast_model(static_df)
     model = trained["model"]
+    residual_std = trained["residual_std"]
     training_mae = trained["training_mae"]
 
-    history_years = bridge_hist["Year of Data"].tolist()
-    history_bhi = bridge_hist["Bridge Health Index (Overall)"].tolist()
+    feature_cols = trained["feature_cols"]
+    last_row = bridge_hist.iloc[-1].copy()
+    last_year = int(last_row["Year of Data"])
+    last_bhi = float(last_row["Bridge Health Index (Overall)"])
 
-    last_year = int(history_years[-1])
-    last_bhi = float(history_bhi[-1])
-    prev_bhi = float(history_bhi[-2])
-
-    first_year = int(history_years[0])
-
-    forecast_rows = []
-    rolling_prev2 = prev_bhi
-    rolling_prev1 = last_bhi
+    future_rows = []
 
     for step in range(1, forecast_horizon + 1):
         forecast_year = last_year + step
-        years_since_first = forecast_year - first_year
-        bhi_change_1yr = rolling_prev1 - rolling_prev2
+        next_row = last_row.copy()
+        next_row["Year of Data"] = forecast_year
+        next_row["Years_Since_First_Observation"] = float(last_row["Years_Since_First_Observation"]) + 1
+        next_row["Bridge_Age"] = float(last_row["Bridge_Age"]) + 1
+        next_row["Time_Since_Last_Reconstruction"] = float(last_row["Time_Since_Last_Reconstruction"]) + 1
+        next_row["BHI_t_minus_2"] = float(last_row["BHI_t_minus_1"])
+        next_row["BHI_t_minus_1"] = float(last_row["Bridge Health Index (Overall)"])
+        next_row["BHI_change_1yr"] = next_row["BHI_t_minus_1"] - next_row["BHI_t_minus_2"]
 
-        X_next = pd.DataFrame([{
-            "Year of Data": forecast_year,
-            "BHI_t_minus_1": rolling_prev1,
-            "BHI_t_minus_2": rolling_prev2,
-            "BHI_change_1yr": bhi_change_1yr,
-            "Years_Since_First_Observation": years_since_first
-        }])
-
+        X_next = pd.DataFrame([{col: next_row[col] for col in feature_cols}])
         pred = float(model.predict(X_next)[0])
-
-        # keep predictions within a valid BHI-like range
         pred = max(0.0, min(100.0, pred))
 
-        lower = max(0.0, pred - 1.96 * training_mae)
-        upper = min(100.0, pred + 1.96 * training_mae)
+        interval = 1.96 * residual_std if residual_std > 0 else 1.96 * training_mae
+        lower = max(0.0, pred - interval)
+        upper = min(100.0, pred + interval)
 
-        forecast_rows.append({
-            "STRUCTURE_NUMBER_008": matched,
+        future_rows.append({
+            "STRUCTURE_NUMBER_008": str(matched),
             "Forecast Year": forecast_year,
             "Predicted BHI": round(pred, 2),
             "Lower 95% PI": round(lower, 2),
-            "Upper 95% PI": round(upper, 2)
+            "Upper 95% PI": round(upper, 2),
         })
 
-        rolling_prev2 = rolling_prev1
-        rolling_prev1 = pred
+        next_row["Bridge Health Index (Overall)"] = pred
+        last_row = next_row
 
-    forecast_df = pd.DataFrame(forecast_rows)
+    forecast_df = pd.DataFrame(future_rows)
 
     latest_cluster = None
     bs = bridge_summary[bridge_summary["STRUCTURE_NUMBER_008"].astype(str) == str(matched)]
     if not bs.empty and "Cluster" in bs.columns:
         latest_cluster = bs["Cluster"].iloc[0]
 
+    model_name = "StackingRegressor (RF + GB + XGB)" if trained["used_xgboost"] else "StackingRegressor (RF + GB)"
     summary_text = (
         f"20-year forecast for bridge {matched}:\n\n"
         f"- Historical records used: {len(bridge_hist)}\n"
         f"- Last observed year: {last_year}\n"
         f"- Last observed overall BHI: {last_bhi:.2f}\n"
-        f"- Training MAE of forecast model: {training_mae:.2f}\n"
+        f"- Forecast methodology: {model_name}\n"
+        f"- Training MAE: {training_mae:.2f}\n"
         f"- Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}\n\n"
-        f"The table shows projected BHI values for the next {forecast_horizon} years."
+        f"The table and plot show projected BHI values for the next {forecast_horizon} years with 95% prediction intervals."
     )
 
     return {
         "text": summary_text,
         "analysis_df": forecast_df,
-        "bridge_ids": [matched],
-        "label": "bridge_20yr_forecast"
+        "bridge_ids": [str(matched)],
+        "label": "bridge_20yr_forecast",
+        "figure": make_bridge_forecast_figure(str(matched), forecast_df)
     }
 
 
@@ -457,29 +550,14 @@ def make_bridge_forecast_figure(bridge_id: str, forecast_df: pd.DataFrame):
         "Bridge Health Index (Overall)"
     ]].copy()
     hist["Year of Data"] = pd.to_numeric(hist["Year of Data"], errors="coerce")
-    hist["Bridge Health Index (Overall)"] = pd.to_numeric(
-        hist["Bridge Health Index (Overall)"], errors="coerce"
-    )
+    hist["Bridge Health Index (Overall)"] = pd.to_numeric(hist["Bridge Health Index (Overall)"], errors="coerce")
     hist = hist.dropna()
-    hist = hist[hist["STRUCTURE_NUMBER_008"].astype(str) == str(matched)].sort_values("Year of Data")
+    hist["STRUCTURE_NUMBER_008"] = hist["STRUCTURE_NUMBER_008"].astype(str).str.strip()
+    hist = hist[hist["STRUCTURE_NUMBER_008"] == str(matched)].sort_values("Year of Data")
 
     fig, ax = plt.subplots(figsize=(10, 5))
-
-    ax.plot(
-        hist["Year of Data"].values,
-        hist["Bridge Health Index (Overall)"].values,
-        marker="o",
-        label="Historical BHI"
-    )
-
-    ax.plot(
-        forecast_df["Forecast Year"].values,
-        forecast_df["Predicted BHI"].values,
-        marker="o",
-        linestyle="--",
-        label="Forecasted BHI"
-    )
-
+    ax.plot(hist["Year of Data"].values, hist["Bridge Health Index (Overall)"].values, marker="o", label="Historical BHI")
+    ax.plot(forecast_df["Forecast Year"].values, forecast_df["Predicted BHI"].values, marker="o", linestyle="--", label="Forecasted BHI")
     ax.fill_between(
         forecast_df["Forecast Year"].values,
         forecast_df["Lower 95% PI"].values,
@@ -487,15 +565,14 @@ def make_bridge_forecast_figure(bridge_id: str, forecast_df: pd.DataFrame):
         alpha=0.2,
         label="95% prediction interval"
     )
-
     ax.set_title(f"20-Year BHI Forecast for Bridge {matched}")
     ax.set_xlabel("Year")
     ax.set_ylabel("Bridge Health Index (Overall)")
     ax.set_ylim(0, 100)
     ax.grid(True, alpha=0.3)
     ax.legend()
-
     return fig
+
 
 # ---------------------------
 # Run pipeline
@@ -512,7 +589,6 @@ cluster_sizes = analysis["cluster_sizes"]
 preprocessing_summary = analysis["preprocessing_summary"]
 
 bridge_ids = sorted(pivot_df.index.astype(str).tolist())
-forecast_artifacts = train_forecast_model(static_df)
 
 # ---------------------------
 # Session state init
@@ -565,28 +641,7 @@ def find_best_bridge_match(bridge_id: str):
 
     return None
 
-def is_forecast_question(question: str):
-    q = question.lower().strip()
-    phrases = [
-        "forecast",
-        "predict",
-        "projection",
-        "20 year projection",
-        "20-year projection",
-        "20 year forecast",
-        "20-year forecast"
-    ]
-    return any(p in q for p in phrases)
 
-
-def extract_bridge_id_from_question(question: str):
-    candidates = re.findall(r"[A-Za-z0-9\-]+", question)
-    for token in candidates:
-        matched = find_best_bridge_match(token)
-        if matched is not None:
-            return matched
-    return None
-    
 def extract_top_n(user_query, default=5):
     patterns = [
         r"top\s+(\d+)",
@@ -834,7 +889,16 @@ def is_cluster_followup(question: str):
         "analyze it further",
         "tell me more",
         "what else about it",
-        "what else for this cluster"
+        "what else for this cluster",
+        "median bhi line",
+        "median line",
+        "interpret the median",
+        "interpret this plot",
+        "interpret this graph",
+        "fluctuations in bhi",
+        "fluctuations over time",
+        "variation over time",
+        "what do the fluctuations mean"
     ]
 
     return any(p in q for p in phrases)
@@ -842,6 +906,23 @@ def is_cluster_followup(question: str):
 
 def resolve_cluster_followup_intent(question: str):
     q = question.lower().strip()
+
+    if any(p in q for p in [
+        "median bhi line",
+        "median line",
+        "interpret the median",
+        "interpret this plot",
+        "interpret this graph"
+    ]):
+        return "cluster_median_interpretation"
+
+    if any(p in q for p in [
+        "fluctuations in bhi",
+        "fluctuations over time",
+        "variation over time",
+        "what do the fluctuations mean"
+    ]):
+        return "cluster_fluctuation_interpretation"
 
     if any(p in q for p in [
         "interesting analysis",
@@ -2107,206 +2188,134 @@ def get_cluster_deep_dive(cluster_id):
 
 
 
-def extract_cluster_graph_features(cluster_id):
+def get_cluster_trend_stats(cluster_id):
     try:
         cluster_id = int(cluster_id)
     except Exception:
         return None
 
-    subset = clustered_df[clustered_df["Cluster"] == cluster_id].drop(columns="Cluster", errors="ignore")
+    subset = clustered_df[clustered_df["Cluster"] == cluster_id].drop(columns="Cluster", errors="ignore").copy()
     if subset.empty:
         return None
 
-    years = np.array(subset.columns.tolist(), dtype=float)
-    median_trend = subset.median(axis=0).astype(float)
-    q25 = subset.quantile(0.25, axis=0).astype(float)
-    q75 = subset.quantile(0.75, axis=0).astype(float)
+    years_local = [c for c in subset.columns if isinstance(c, (int, np.integer, float, np.floating))]
+    if not years_local:
+        return None
 
-    x = years
-    y = median_trend.values
+    subset = subset[years_local].copy()
+    subset = subset.apply(pd.to_numeric, errors="coerce")
 
-    if len(x) >= 2:
-        slope, intercept, r_value, p_value, std_err = linregress(x, y)
+    median_trend = subset.median(axis=0)
+    q1_trend = subset.quantile(0.25, axis=0)
+    q3_trend = subset.quantile(0.75, axis=0)
+    iqr_trend = q3_trend - q1_trend
+
+    valid_idx = median_trend.dropna().index.tolist()
+    if len(valid_idx) < 2:
+        return None
+
+    first_year = int(valid_idx[0])
+    last_year = int(valid_idx[-1])
+
+    first_median = float(median_trend.loc[first_year])
+    last_median = float(median_trend.loc[last_year])
+    net_change = last_median - first_median
+
+    x = np.array(valid_idx, dtype=float)
+    y = np.array([median_trend.loc[yr] for yr in valid_idx], dtype=float)
+
+    if len(x) >= 2 and np.isfinite(y).sum() >= 2:
+        slope, _, _, _, _ = linregress(x, y)
     else:
         slope = np.nan
 
-    net_change = float(y[-1] - y[0]) if len(y) >= 2 else np.nan
-    peak_year = int(x[np.argmax(y)]) if len(y) > 0 else None
-    trough_year = int(x[np.argmin(y)]) if len(y) > 0 else None
-    max_spread = float((q75 - q25).max()) if len(q75) > 0 else np.nan
-    mean_spread = float((q75 - q25).mean()) if len(q75) > 0 else np.nan
+    peak_year = int(median_trend.idxmax())
+    trough_year = int(median_trend.idxmin())
+    peak_value = float(median_trend.max())
+    trough_value = float(median_trend.min())
 
-    diffs = np.diff(y)
-    turning_points = int(np.sum(np.sign(diffs[:-1]) != np.sign(diffs[1:]))) if len(diffs) >= 2 else 0
-
-    rebound = False
-    if len(y) >= 5:
-        rebound = bool((np.min(y[:-2]) < y[-1]) and (y[-1] > y[-3]))
-
-    largest_drop = float(np.min(diffs)) if len(diffs) > 0 else np.nan
-    largest_gain = float(np.max(diffs)) if len(diffs) > 0 else np.nan
-
-    below_50_share = float((subset.lt(50).sum().sum()) / subset.size) if subset.size > 0 else np.nan
-    below_30_share = float((subset.lt(30).sum().sum()) / subset.size) if subset.size > 0 else np.nan
+    avg_iqr = float(iqr_trend.mean()) if not iqr_trend.empty else np.nan
+    max_iqr_year = int(iqr_trend.idxmax()) if not iqr_trend.empty else None
+    max_iqr_value = float(iqr_trend.max()) if not iqr_trend.empty else np.nan
 
     return {
         "cluster_id": cluster_id,
-        "bridge_count": int(len(subset)),
-        "start_year": int(x[0]),
-        "end_year": int(x[-1]),
-        "start_bhi": float(y[0]),
-        "end_bhi": float(y[-1]),
-        "median_slope": float(slope) if pd.notna(slope) else None,
+        "n_bridges": int(subset.shape[0]),
+        "years": valid_idx,
+        "first_year": first_year,
+        "last_year": last_year,
+        "first_median": first_median,
+        "last_median": last_median,
         "net_change": net_change,
+        "slope": float(slope) if pd.notna(slope) else np.nan,
         "peak_year": peak_year,
+        "peak_value": peak_value,
         "trough_year": trough_year,
-        "max_variability_iqr": max_spread,
-        "mean_variability_iqr": mean_spread,
-        "turning_points": turning_points,
-        "rebound_detected": rebound,
-        "largest_year_to_year_drop": largest_drop,
-        "largest_year_to_year_gain": largest_gain,
-        "share_below_bhi_50": below_50_share,
-        "share_below_bhi_30": below_30_share,
+        "trough_value": trough_value,
+        "avg_iqr": avg_iqr,
+        "max_iqr_year": max_iqr_year,
+        "max_iqr_value": max_iqr_value,
+        "median_trend": median_trend,
+        "iqr_trend": iqr_trend,
     }
 
 
-def generate_cluster_interpretation_paragraph(feature_dict):
-    if not feature_dict:
-        return "I couldn’t extract enough graph features for interpretation."
+def interpret_slope_text(slope):
+    if pd.isna(slope):
+        return "no clear trend could be estimated"
+    if slope > 0.1:
+        return "an overall improving trend"
+    if slope < -0.1:
+        return "an overall deteriorating trend"
+    return "a largely stable trend"
 
-    prompt = f"""
-You are a bridge deterioration analyst.
 
-Write one analytical paragraph explaining how to read this cluster graph and what it suggests.
-Use only the structured facts below.
-Do not invent causes.
-You may use cautious phrases like 'this may suggest' or 'one possible explanation is'.
-Mention unusual behavior if present.
+def interpret_cluster_trend(cluster_id):
+    stats = get_cluster_trend_stats(cluster_id)
+    if stats is None:
+        return f"I couldn’t compute the median trend for cluster {cluster_id}."
 
-Structured facts:
-{feature_dict}
+    trend_text = interpret_slope_text(stats["slope"])
 
-Requirements:
-- one paragraph
-- clear and professional
-- explain trend direction
-- explain stability or variability
-- mention unusual behavior such as rebound or turning points
-- mention what a reader should notice in the graph
-"""
+    return (
+        f"For cluster {cluster_id}, the median BHI line represents the middle Bridge Health Index value across all bridges in the cluster at each year.\n\n"
+        f"In this cluster, the median line shows {trend_text} from {stats['first_year']} to {stats['last_year']}. "
+        f"The median BHI changes from {stats['first_median']:.2f} to {stats['last_median']:.2f}, "
+        f"which is a net change of {stats['net_change']:.2f} points. "
+        f"The highest median value occurs around {stats['peak_year']} at {stats['peak_value']:.2f}, "
+        f"and the lowest occurs around {stats['trough_year']} at {stats['trough_value']:.2f}.\n\n"
+        f"So, the median line should be read as the typical bridge trajectory in this cluster, not every individual bridge. "
+        f"If individual lines spread away from the median, that means some bridges behave differently from the cluster’s typical pattern."
+    )
 
-    try:
-        response = bedrock.converse(
-            modelId=BEDROCK_MODEL_ID,
-            system=[{"text": "Return only the final paragraph. No bullet points."}],
-            messages=[{"role": "user", "content": [{"text": prompt}]}]
+
+def interpret_cluster_fluctuations(cluster_id):
+    stats = get_cluster_trend_stats(cluster_id)
+    if stats is None:
+        return f"I couldn’t compute fluctuation statistics for cluster {cluster_id}."
+
+    if pd.isna(stats["avg_iqr"]):
+        variability_text = "I could not estimate the year-to-year spread reliably."
+    elif stats["avg_iqr"] < 5:
+        variability_text = "Fluctuations are relatively small, which means bridges in this cluster behave fairly consistently around the median."
+    elif stats["avg_iqr"] < 15:
+        variability_text = "Fluctuations are moderate, which means there is some variation across bridges, but the cluster still follows a common overall pattern."
+    else:
+        variability_text = "Fluctuations are relatively large, which means bridges in this cluster differ substantially from one another over time."
+
+    extra_text = ""
+    if stats["max_iqr_year"] is not None and pd.notna(stats["max_iqr_value"]):
+        extra_text = (
+            f" The largest spread appears around {stats['max_iqr_year']}, "
+            f"where the interquartile range is {stats['max_iqr_value']:.2f}."
         )
-        output_message = response["output"]["message"]
-        text = extract_text_from_content_blocks(output_message["content"]).strip()
-        return strip_thinking_blocks(text)
-    except Exception as e:
-        return f"Interpretation generation failed: {e}"
 
-
-def interpret_cluster_graph(cluster_id):
-    cluster_id = int(cluster_id)
-    features = extract_cluster_graph_features(cluster_id)
-    if not features:
-        return {"text": f"No graph interpretation could be generated for cluster {cluster_id}."}
-
-    paragraph = generate_cluster_interpretation_paragraph(features)
-
-    return {
-        "text": paragraph,
-        "cluster_id": cluster_id,
-        "cluster_ids": [cluster_id],
-        "analysis_df": pd.DataFrame([features]),
-        "label": f"cluster_graph_interpretation_{cluster_id}",
-        "show_cluster_chart": True
-    }
-
-
-def extract_cluster_comparison_features(cluster_id_1, cluster_id_2):
-    f1 = extract_cluster_graph_features(cluster_id_1)
-    f2 = extract_cluster_graph_features(cluster_id_2)
-
-    if not f1 or not f2:
-        return None
-
-    slope_1 = f1.get("median_slope")
-    slope_2 = f2.get("median_slope")
-
-    return {
-        "cluster_1": f1,
-        "cluster_2": f2,
-        "difference_in_end_bhi": f1["end_bhi"] - f2["end_bhi"],
-        "difference_in_slope": (
-            (slope_1 - slope_2) if slope_1 is not None and slope_2 is not None else None
-        ),
-        "difference_in_variability": f1["mean_variability_iqr"] - f2["mean_variability_iqr"]
-    }
-
-
-def generate_cluster_comparison_paragraph(comparison_dict):
-    if not comparison_dict:
-        return "I couldn’t extract enough information for cluster comparison interpretation."
-
-    prompt = f"""
-You are a bridge deterioration analyst.
-
-Write one analytical paragraph comparing two cluster graphs using only the structured facts below.
-Explain:
-- which cluster is more stable
-- which one deteriorates faster or performs better
-- how to read the difference visually
-- possible cautious explanations for unusual behavior
-Do not invent unsupported claims.
-
-Structured facts:
-{comparison_dict}
-
-Return only one paragraph.
-"""
-    try:
-        response = bedrock.converse(
-            modelId=BEDROCK_MODEL_ID,
-            system=[{"text": "Return only the final paragraph. No bullet points."}],
-            messages=[{"role": "user", "content": [{"text": prompt}]}]
-        )
-        output_message = response["output"]["message"]
-        text = extract_text_from_content_blocks(output_message["content"]).strip()
-        return strip_thinking_blocks(text)
-    except Exception as e:
-        return f"Comparison interpretation generation failed: {e}"
-
-
-def interpret_cluster_comparison(cluster_id_1, cluster_id_2):
-    cluster_id_1 = int(cluster_id_1)
-    cluster_id_2 = int(cluster_id_2)
-    features = extract_cluster_comparison_features(cluster_id_1, cluster_id_2)
-    if not features:
-        return {"text": "I couldn’t extract enough information for cluster comparison interpretation."}
-
-    paragraph = generate_cluster_comparison_paragraph(features)
-
-    return {
-        "text": paragraph,
-        "cluster_id_1": cluster_id_1,
-        "cluster_id_2": cluster_id_2,
-        "cluster_ids": [cluster_id_1, cluster_id_2],
-        "analysis_df": pd.DataFrame([
-            {
-                "Cluster 1": cluster_id_1,
-                "Cluster 2": cluster_id_2,
-                "End BHI Difference": features["difference_in_end_bhi"],
-                "Slope Difference": features["difference_in_slope"],
-                "Variability Difference": features["difference_in_variability"]
-            }
-        ]),
-        "label": f"cluster_comparison_interpretation_{cluster_id_1}_{cluster_id_2}",
-        "show_compare_clusters_chart": True
-    }
+    return (
+        f"For cluster {cluster_id}, fluctuations in BHI over time should be interpreted as variation around the cluster median line.\n\n"
+        f"{variability_text}{extra_text}\n\n"
+        f"If the median line itself moves sharply upward or downward, that indicates a cluster-level shift in typical bridge condition. "
+        f"If the median stays fairly steady but the individual bridge lines are widely scattered, that means the cluster contains bridges with mixed behaviors even though the typical value is stable."
+    )
 
 # ---------------------------
 # Plotting
@@ -2526,24 +2535,50 @@ def route_question(question: str):
     q = question.lower().strip()
     cluster_ids_local = extract_cluster_ids(q)
 
-    # ---------------------------
-    # Forecast routing
-    # ---------------------------
     if is_forecast_question(question):
         bridge_id = extract_bridge_id_from_question(question)
         if bridge_id is None:
             return {
                 "mode": "direct_text",
-                "text": "Please include a valid bridge ID for forecasting, for example: Forecast bridge 100000010113013 for the next 20 years."
+                "text": "Please include a valid bridge ID for forecasting, for example: Forecast bridge 200000BC3107010 for the next 20 years."
             }
-
         return {
             "mode": "direct_tool",
             "tool_name": "forecast_bridge_20_years",
-            "tool_input": {
-                "bridge_id": bridge_id,
-                "forecast_horizon": 20
-            }
+            "tool_input": {"bridge_id": bridge_id, "forecast_horizon": 20}
+        }
+
+    if (
+        len(cluster_ids_local) == 1 and
+        any(phrase in q for phrase in [
+            "median bhi line",
+            "median line",
+            "interpret the median",
+            "interpret this plot",
+            "interpret this graph"
+        ])
+    ):
+        return {
+            "mode": "direct_text",
+            "text": interpret_cluster_trend(cluster_ids_local[0]),
+            "cluster_ids": [cluster_ids_local[0]],
+            "label": "cluster_median_interpretation"
+        }
+
+    if (
+        len(cluster_ids_local) == 1 and
+        any(phrase in q for phrase in [
+            "fluctuations in bhi",
+            "fluctuations over time",
+            "variation over time",
+            "what do the fluctuations mean"
+        ])
+    ):
+        return {
+            "mode": "direct_text",
+            "text": interpret_cluster_fluctuations(cluster_ids_local[0]),
+            "cluster_ids": [cluster_ids_local[0]],
+            "label": "cluster_fluctuation_interpretation"
         }
 
     if (
@@ -2589,43 +2624,13 @@ def route_question(question: str):
         }
 
     if len(cluster_ids_local) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
-        tool_name = "compare_clusters"
-        if any(p in q for p in [
-            "compare the graphs",
-            "compare these clusters analytically",
-            "how are these cluster graphs different",
-            "which cluster is more stable",
-            "why are these clusters different",
-            "interpret the comparison",
-            "analyze the comparison"
-        ]):
-            tool_name = "cluster_comparison_interpretation"
         return {
             "mode": "direct_tool",
-            "tool_name": tool_name,
+            "tool_name": "compare_clusters",
             "tool_input": {
                 "cluster_id_1": cluster_ids_local[0],
                 "cluster_id_2": cluster_ids_local[1]
             }
-        }
-
-    if len(cluster_ids_local) == 1 and any(p in q for p in [
-        "how do i read this graph",
-        "how to read this graph",
-        "what does this graph mean",
-        "interpret this graph",
-        "analyze this graph",
-        "what does this cluster graph show",
-        "why is this cluster unusual",
-        "why does this cluster behave like this",
-        "explain this pattern",
-        "interpret this cluster",
-        "read this cluster graph"
-    ]):
-        return {
-            "mode": "direct_tool",
-            "tool_name": "cluster_graph_interpretation",
-            "tool_input": {"cluster_id": cluster_ids_local[0]}
         }
 
     if len(cluster_ids_local) == 1 and any(p in q for p in [
@@ -2675,6 +2680,7 @@ def route_question(question: str):
         }
 
     return {"mode": "bedrock"}
+
 
 def get_tool_config():
     return {
@@ -2925,39 +2931,8 @@ def get_tool_config():
             },
             {
                 "toolSpec": {
-                    "name": "cluster_graph_interpretation",
-                    "description": "Interpret one cluster trend graph analytically using extracted graph features and explain what the pattern suggests.",
-                    "inputSchema": {
-                        "json": {
-                            "type": "object",
-                            "properties": {
-                                "cluster_id": {"type": "integer"}
-                            },
-                            "required": ["cluster_id"]
-                        }
-                    }
-                }
-            },
-            {
-                "toolSpec": {
-                    "name": "cluster_comparison_interpretation",
-                    "description": "Interpret two cluster graphs analytically and explain which is more stable, which deteriorates faster, and what unusual differences stand out.",
-                    "inputSchema": {
-                        "json": {
-                            "type": "object",
-                            "properties": {
-                                "cluster_id_1": {"type": "integer"},
-                                "cluster_id_2": {"type": "integer"}
-                            },
-                            "required": ["cluster_id_1", "cluster_id_2"]
-                        }
-                    }
-                }
-            },
-            {
-                "toolSpec": {
                     "name": "forecast_bridge_20_years",
-                    "description": "Forecast the next N years of overall Bridge Health Index for a specific bridge using the trained recursive forecast model.",
+                    "description": "Forecast the next years of overall BHI for a specific bridge using the forecasting methodology.",
                     "inputSchema": {
                         "json": {
                             "type": "object",
@@ -3046,8 +3021,6 @@ def execute_tool(tool_name, tool_input):
             "text": compare_two_clusters(cluster_id_1, cluster_id_2),
             "cluster_id_1": cluster_id_1,
             "cluster_id_2": cluster_id_2,
-            "cluster_ids": [cluster_id_1, cluster_id_2],
-            "label": f"compare_clusters_{cluster_id_1}_{cluster_id_2}",
             "show_compare_clusters_chart": True
         }
 
@@ -3100,22 +3073,10 @@ def execute_tool(tool_name, tool_input):
         columns = tool_input.get("columns", None)
         return browse_dataset_rows(offset=offset, limit=limit, columns=columns)
 
-    if tool_name == "cluster_graph_interpretation":
-        cluster_id = int(tool_input["cluster_id"])
-        return interpret_cluster_graph(cluster_id)
-
-    if tool_name == "cluster_comparison_interpretation":
-        cluster_id_1 = int(tool_input["cluster_id_1"])
-        cluster_id_2 = int(tool_input["cluster_id_2"])
-        return interpret_cluster_comparison(cluster_id_1, cluster_id_2)
-
     if tool_name == "forecast_bridge_20_years":
         bridge_id = tool_input["bridge_id"]
         forecast_horizon = int(tool_input.get("forecast_horizon", 20))
-        result = forecast_bridge_20_years(bridge_id=bridge_id, forecast_horizon=forecast_horizon)
-        if result.get("analysis_df") is not None and not result["analysis_df"].empty:
-            result["figure"] = make_bridge_forecast_figure(bridge_id, result["analysis_df"])
-        return result
+        return forecast_bridge_20_years(bridge_id=bridge_id, forecast_horizon=forecast_horizon)
 
     if tool_name == "python_analysis":
         user_request = tool_input["user_request"]
@@ -3375,9 +3336,15 @@ def ask_bedrock_with_tools(user_prompt):
                     toolConfig=get_tool_config()
                 )
             except (BotoCoreError, ClientError) as e:
+                fallback_text = "I ran the requested analysis, but the follow-up model response failed."
+                if pending_analysis_df is not None or pending_summary_df is not None or pending_pc1_table is not None:
+                    fallback_text += " The computed result is still available below."
+                else:
+                    fallback_text += f" Error: {e}"
+
                 return {
-                    "text": f"Bedrock follow-up request failed: {e}",
-                    "chart": None,
+                    "text": fallback_text,
+                    "chart": pending_chart,
                     "summary_df": pending_summary_df,
                     "cluster_df": pending_cluster_df,
                     "pc1_table": pending_pc1_table,
@@ -3492,58 +3459,53 @@ def answer_question(question):
 
         intent = resolve_cluster_followup_intent(question)
 
+        if intent == "cluster_median_interpretation":
+            fig = make_cluster_median_figure(cluster_id)
+            return {
+                "text": interpret_cluster_trend(cluster_id),
+                "figure": fig,
+                "summary_df": None,
+                "cluster_df": None,
+                "pc1_table": None,
+                "schema_df": None,
+                "column_df": None,
+                "values_df": None,
+                "preview_df": None,
+                "browse_df": None,
+                "analysis_df": None,
+                "generated_code": None,
+                "execution_steps": None,
+                "stdout": None,
+                "bridge_ids": None,
+                "cluster_ids": [cluster_id],
+                "label": "cluster_median_interpretation"
+            }
+
+        if intent == "cluster_fluctuation_interpretation":
+            fig = make_cluster_median_figure(cluster_id)
+            return {
+                "text": interpret_cluster_fluctuations(cluster_id),
+                "figure": fig,
+                "summary_df": None,
+                "cluster_df": None,
+                "pc1_table": None,
+                "schema_df": None,
+                "column_df": None,
+                "values_df": None,
+                "preview_df": None,
+                "browse_df": None,
+                "analysis_df": None,
+                "generated_code": None,
+                "execution_steps": None,
+                "stdout": None,
+                "bridge_ids": None,
+                "cluster_ids": [cluster_id],
+                "label": "cluster_fluctuation_interpretation"
+            }
+
         if intent == "cluster_pca":
             result = execute_tool("cluster_pca_drivers", {"cluster_id": cluster_id, "top_n": 8})
             fig = None
-            return {
-                "text": result.get("text"),
-                "figure": fig,
-                "summary_df": result.get("summary_df"),
-                "cluster_df": result.get("cluster_df"),
-                "pc1_table": result.get("pc1_table"),
-                "schema_df": result.get("schema_df"),
-                "column_df": result.get("column_df"),
-                "values_df": result.get("values_df"),
-                "preview_df": result.get("preview_df"),
-                "browse_df": result.get("browse_df"),
-                "analysis_df": result.get("analysis_df"),
-                "generated_code": result.get("generated_code"),
-                "execution_steps": result.get("execution_steps"),
-                "stdout": result.get("stdout"),
-                "bridge_ids": result.get("bridge_ids"),
-                "cluster_ids": result.get("cluster_ids"),
-                "label": result.get("label")
-            }
-
-        if intent == "cluster_graph_interpretation":
-            result = execute_tool("cluster_graph_interpretation", {"cluster_id": cluster_id})
-            fig = make_cluster_median_figure(cluster_id)
-            return {
-                "text": result.get("text"),
-                "figure": fig,
-                "summary_df": result.get("summary_df"),
-                "cluster_df": result.get("cluster_df"),
-                "pc1_table": result.get("pc1_table"),
-                "schema_df": result.get("schema_df"),
-                "column_df": result.get("column_df"),
-                "values_df": result.get("values_df"),
-                "preview_df": result.get("preview_df"),
-                "browse_df": result.get("browse_df"),
-                "analysis_df": result.get("analysis_df"),
-                "generated_code": result.get("generated_code"),
-                "execution_steps": result.get("execution_steps"),
-                "stdout": result.get("stdout"),
-                "bridge_ids": result.get("bridge_ids"),
-                "cluster_ids": result.get("cluster_ids"),
-                "label": result.get("label")
-            }
-
-        if intent == "cluster_comparison_interpretation" and len(prior_cluster_ids) >= 2:
-            result = execute_tool(
-                "cluster_comparison_interpretation",
-                {"cluster_id_1": prior_cluster_ids[0], "cluster_id_2": prior_cluster_ids[1]}
-            )
-            fig = make_compare_clusters_figure(prior_cluster_ids[0], prior_cluster_ids[1])
             return {
                 "text": result.get("text"),
                 "figure": fig,
@@ -3690,8 +3652,8 @@ def answer_question(question):
             "execution_steps": None,
             "stdout": None,
             "bridge_ids": None,
-            "cluster_ids": None,
-            "label": None
+            "cluster_ids": routed.get("cluster_ids"),
+            "label": routed.get("label")
         }
 
     if routed["mode"] == "direct_tool":
@@ -3699,11 +3661,10 @@ def answer_question(question):
         result = execute_tool(routed["tool_name"], routed["tool_input"])
 
         fig = result.get("figure")
-        if fig is None:
-            if result.get("show_cluster_chart"):
-                fig = make_cluster_median_figure(result["cluster_id"])
-            elif result.get("show_compare_clusters_chart"):
-                fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
+        if fig is None and result.get("show_cluster_chart"):
+            fig = make_cluster_median_figure(result["cluster_id"])
+        elif fig is None and result.get("show_compare_clusters_chart"):
+            fig = make_compare_clusters_figure(result["cluster_id_1"], result["cluster_id_2"])
 
         return {
             "text": result.get("text"),
@@ -3783,8 +3744,6 @@ with st.sidebar:
     - Compare bridge {example_1} and {example_2}
     - Summarize cluster 2
     - Compare cluster 2 and cluster 3
-    - Interpret cluster 2 graph
-    - Compare the graphs of cluster 2 and cluster 3
     - What features characterize cluster 5?
     - What columns are in the dataset?
     - Show me the first 10 rows of the dataset
