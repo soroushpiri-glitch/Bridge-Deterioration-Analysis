@@ -31,6 +31,12 @@ except Exception:
 N_CLUSTERS = 6
 STATIC_FILE = "STEEL_Bridges.csv"
 
+# Project-style forecasting constants
+EMPIRICAL_DETERIORATION_RATE = 0.214
+ADT_GROWTH_RATE = 0.0003
+TEMP_INCREASE_RATE = 0.0015
+CRITICAL_BHI_THRESHOLD = 60
+
 # ---------------------------
 # AWS config
 # ---------------------------
@@ -490,24 +496,38 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         next_row["BHI_t_minus_2"] = float(last_row["BHI_t_minus_1"])
         next_row["BHI_t_minus_1"] = float(last_row["Bridge Health Index (Overall)"])
         next_row["BHI_change_1yr"] = next_row["BHI_t_minus_1"] - next_row["BHI_t_minus_2"]
+        if "Approx_Avg_Temp" in next_row.index:
+            next_row["Approx_Avg_Temp"] = float(last_row["Approx_Avg_Temp"]) + TEMP_INCREASE_RATE
 
         X_next = pd.DataFrame([{col: next_row[col] for col in feature_cols}])
-        pred = float(model.predict(X_next)[0])
-        pred = max(0.0, min(100.0, pred))
+        model_pred = float(model.predict(X_next)[0])
+        model_pred = max(0.0, min(100.0, model_pred))
 
-        interval = 1.96 * residual_std if residual_std > 0 else 1.96 * training_mae
-        lower = max(0.0, pred - interval)
-        upper = min(100.0, pred + interval)
+        # Project-style deterioration overlay
+        deteriorated_pred = max(0.0, min(100.0, model_pred - EMPIRICAL_DETERIORATION_RATE * step))
+
+        empirical_uncertainty = residual_std * step
+        lower_empirical = max(0.0, deteriorated_pred - 1.96 * empirical_uncertainty)
+        upper_empirical = min(100.0, deteriorated_pred + 1.96 * empirical_uncertainty)
+
+        residual_pi = 1.96 * residual_std
+        lower_pi = max(0.0, deteriorated_pred - residual_pi)
+        upper_pi = min(100.0, deteriorated_pred + residual_pi)
 
         future_rows.append({
             "STRUCTURE_NUMBER_008": str(matched),
             "Forecast Year": forecast_year,
-            "Predicted BHI": round(pred, 2),
-            "Lower 95% PI": round(lower, 2),
-            "Upper 95% PI": round(upper, 2),
+            "Model Predicted BHI": round(model_pred, 2),
+            "Predicted BHI": round(deteriorated_pred, 2),
+            "Empirical Uncertainty": round(empirical_uncertainty, 3),
+            "Lower 95% PI": round(lower_pi, 2),
+            "Upper 95% PI": round(upper_pi, 2),
+            "Lower Empirical": round(lower_empirical, 2),
+            "Upper Empirical": round(upper_empirical, 2),
+            "Critical Threshold": CRITICAL_BHI_THRESHOLD,
         })
 
-        next_row["Bridge Health Index (Overall)"] = pred
+        next_row["Bridge Health Index (Overall)"] = deteriorated_pred
         last_row = next_row
 
     forecast_df = pd.DataFrame(future_rows)
@@ -523,10 +543,12 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         f"- Historical records used: {len(bridge_hist)}\n"
         f"- Last observed year: {last_year}\n"
         f"- Last observed overall BHI: {last_bhi:.2f}\n"
-        f"- Forecast methodology: {model_name}\n"
+        f"- Forecast methodology: {model_name} + empirical deterioration overlay\n"
+        f"- Empirical deterioration rate: {EMPIRICAL_DETERIORATION_RATE:.3f} BHI/year\n"
         f"- Training MAE: {training_mae:.2f}\n"
+        f"- Residual std: {residual_std:.3f}\n"
         f"- Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}\n\n"
-        f"The table and plot show projected BHI values for the next {forecast_horizon} years with 95% prediction intervals."
+        f"The table and plot show project-style projected BHI values for the next {forecast_horizon} years, including a residual 95% prediction interval, an empirical uncertainty band, and the critical threshold at BHI = {CRITICAL_BHI_THRESHOLD}."
     )
 
     return {
@@ -543,34 +565,29 @@ def make_bridge_forecast_figure(bridge_id: str, forecast_df: pd.DataFrame):
     if matched is None or forecast_df is None or forecast_df.empty:
         return None
 
-    hist = static_df.copy()
-    hist = hist[[
-        "STRUCTURE_NUMBER_008",
-        "Year of Data",
-        "Bridge Health Index (Overall)"
-    ]].copy()
-    hist["Year of Data"] = pd.to_numeric(hist["Year of Data"], errors="coerce")
-    hist["Bridge Health Index (Overall)"] = pd.to_numeric(hist["Bridge Health Index (Overall)"], errors="coerce")
-    hist = hist.dropna()
-    hist["STRUCTURE_NUMBER_008"] = hist["STRUCTURE_NUMBER_008"].astype(str).str.strip()
-    hist = hist[hist["STRUCTURE_NUMBER_008"] == str(matched)].sort_values("Year of Data")
-
+    # Project-style plot: forecast window only
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(hist["Year of Data"].values, hist["Bridge Health Index (Overall)"].values, marker="o", label="Historical BHI")
-    ax.plot(forecast_df["Forecast Year"].values, forecast_df["Predicted BHI"].values, marker="o", linestyle="--", label="Forecasted BHI")
-    ax.fill_between(
-        forecast_df["Forecast Year"].values,
-        forecast_df["Lower 95% PI"].values,
-        forecast_df["Upper 95% PI"].values,
-        alpha=0.2,
-        label="95% prediction interval"
-    )
-    ax.set_title(f"20-Year BHI Forecast for Bridge {matched}")
+
+    years = forecast_df["Forecast Year"].values
+    pred = forecast_df["Predicted BHI"].values
+    low_pi = forecast_df["Lower 95% PI"].values
+    up_pi = forecast_df["Upper 95% PI"].values
+    low_emp = forecast_df["Lower Empirical"].values
+    up_emp = forecast_df["Upper Empirical"].values
+
+    ax.plot(years, pred, color="blue", linewidth=2, label="Predicted BHI (Deteriorated)")
+    ax.fill_between(years, low_pi, up_pi, color="lightgreen", alpha=0.6, label="95% PI (Residual)")
+    ax.fill_between(years, low_emp, up_emp, color="gold", alpha=0.35, label="Uncertainty Interval (Empirical)")
+    ax.axhline(CRITICAL_BHI_THRESHOLD, color="red", linestyle="--", linewidth=1.8, label=f"Critical Threshold (BHI={CRITICAL_BHI_THRESHOLD})")
+
+    ax.text(years[-1] - 1.3, pred[-1] + 0.2, f"BHI={pred[-1]:.1f}", color="navy", fontsize=9)
+
+    ax.set_title(f"Steel Bridge {matched} - 20-Year Forecast with Deterioration")
     ax.set_xlabel("Year")
-    ax.set_ylabel("Bridge Health Index (Overall)")
-    ax.set_ylim(0, 100)
-    ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.set_ylabel("Predicted BHI")
+    ax.set_ylim(max(58, np.floor(min(low_emp.min(), low_pi.min(), pred.min()) - 2)), 102)
+    ax.grid(True, linestyle=":", alpha=0.7)
+    ax.legend(loc="lower left")
     return fig
 
 
