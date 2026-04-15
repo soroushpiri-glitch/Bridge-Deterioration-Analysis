@@ -568,9 +568,9 @@ def forecast_bridge_20_years(bridge_id: str, forecast_horizon: int = 20):
         model_pred = max(0.0, min(100.0, model_pred))
 
         # Project-style deterioration overlay
-        deteriorated_pred = max(0.0, min(100.0, model_pred - EMPIRICAL_DETERIORATION_RATE * step))
+        deteriorated_pred = max(0.0, min(100.0, model_pred - EMPIRICAL_DETERIORATION_RATE * (step ** 0.9)))
 
-        empirical_uncertainty = residual_std * step
+        empirical_uncertainty = residual_std * np.sqrt(step)
         lower_empirical = max(0.0, deteriorated_pred - 1.96 * empirical_uncertainty)
         upper_empirical = min(100.0, deteriorated_pred + 1.96 * empirical_uncertainty)
 
