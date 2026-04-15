@@ -503,33 +503,20 @@ def build_forecast_execution_explanation(
         f"Plotted the projected BHI, both uncertainty bands, and the critical threshold at BHI = {CRITICAL_BHI_THRESHOLD}."
     ]
 
-    explanation_text = (
-        f"Projection execution for bridge {bridge_id}:
+    explanation_text = f"""Projection execution for bridge {bridge_id}:
 
-"
-        f"- Historical records used: {len(bridge_hist)}
-"
-        f"- Forecast horizon: {forecast_horizon} years
-"
-        f"- Model used: {model_name}
-"
-        f"- Features used: {feature_text}
-"
-        f"- Training MAE: {trained.get('training_mae', float('nan')):.2f}
-"
-        f"- Residual standard deviation: {trained.get('residual_std', float('nan')):.3f}
-"
-        f"- Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}
-"
-        f"- Empirical deterioration rate: {EMPIRICAL_DETERIORATION_RATE:.3f} BHI/year
-"
-        f"- Temperature increase assumption: {TEMP_INCREASE_RATE:.4f} per year
-"
-        f"- Critical threshold: BHI = {CRITICAL_BHI_THRESHOLD}
+- Historical records used: {len(bridge_hist)}
+- Forecast horizon: {forecast_horizon} years
+- Model used: {model_name}
+- Features used: {feature_text}
+- Training MAE: {trained.get('training_mae', float('nan')):.2f}
+- Residual standard deviation: {trained.get('residual_std', float('nan')):.3f}
+- Cluster: {int(latest_cluster) if pd.notna(latest_cluster) else 'N/A'}
+- Empirical deterioration rate: {EMPIRICAL_DETERIORATION_RATE:.3f} BHI/year
+- Temperature increase assumption: {TEMP_INCREASE_RATE:.4f} per year
+- Critical threshold: BHI = {CRITICAL_BHI_THRESHOLD}
 
-"
-        f"This forecast was executed using a recursive ML-based projection pipeline combined with your project-style deterioration and uncertainty overlay."
-    )
+This forecast was executed using a recursive ML-based projection pipeline combined with your project-style deterioration and uncertainty overlay."""
 
     return {
         "text": explanation_text,
