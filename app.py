@@ -3230,33 +3230,118 @@ def interpret_cluster_comparison_plot(cluster_ids):
 
     c1, c2 = int(cluster_ids[0]), int(cluster_ids[1])
 
-    df1 = bridge_summary[bridge_summary["Cluster"] == c1].copy()
-    df2 = bridge_summary[bridge_summary["Cluster"] == c2].copy()
-
-    if df1.empty or df2.empty:
+    if clustered_df.empty:
         return {
             "text": f"I could not find enough data to interpret the comparison between Cluster {c1} and Cluster {c2}.",
             "cluster_ids": [c1, c2],
             "label": "cluster_comparison_plot_missing"
         }
 
+    med1 = clustered_df[clustered_df["Cluster"] == c1].drop(columns=["Cluster"], errors="ignore").median(axis=0)
+    med2 = clustered_df[clustered_df["Cluster"] == c2].drop(columns=["Cluster"], errors="ignore").median(axis=0)
+
+    if med1.empty or med2.empty:
+        return {
+            "text": f"I could not find enough data to interpret the comparison between Cluster {c1} and Cluster {c2}.",
+            "cluster_ids": [c1, c2],
+            "label": "cluster_comparison_plot_missing"
+        }
+
+    med1.index = pd.to_numeric(med1.index, errors="coerce")
+    med2.index = pd.to_numeric(med2.index, errors="coerce")
+    med1 = med1[med1.index.notna()].sort_index()
+    med2 = med2[med2.index.notna()].sort_index()
+
+    common_years = med1.index.intersection(med2.index)
+    if len(common_years) < 2:
+        return {
+            "text": f"I could not find enough aligned yearly points to interpret the comparison between Cluster {c1} and Cluster {c2}.",
+            "cluster_ids": [c1, c2],
+            "label": "cluster_comparison_plot_missing"
+        }
+
+    med1 = med1.loc[common_years]
+    med2 = med2.loc[common_years]
+
+    start_year = int(common_years.min())
+    end_year = int(common_years.max())
+    start1, end1 = float(med1.iloc[0]), float(med1.iloc[-1])
+    start2, end2 = float(med2.iloc[0]), float(med2.iloc[-1])
+
+    initial_gap = abs(start1 - start2)
+    final_gap = abs(end1 - end2)
+
+    early_higher = f"Cluster {c1}" if start1 > start2 else f"Cluster {c2}"
+    late_higher = f"Cluster {c1}" if end1 > end2 else f"Cluster {c2}"
+
+    trend1 = "improves" if end1 > start1 + 1 else "declines" if end1 < start1 - 1 else "stays relatively stable"
+    trend2 = "improves" if end2 > start2 + 1 else "declines" if end2 < start2 - 1 else "stays relatively stable"
+
+    relation = "converge" if final_gap < initial_gap - 1 else "diverge" if final_gap > initial_gap + 1 else "remain similarly separated"
+
+    diff1 = med1.diff().fillna(0)
+    diff2 = med2.diff().fillna(0)
+    jump_year_1 = int(diff1.abs().idxmax()) if len(diff1) else start_year
+    jump_year_2 = int(diff2.abs().idxmax()) if len(diff2) else start_year
+    jump_1 = float(diff1.loc[jump_year_1]) if jump_year_1 in diff1.index else 0.0
+    jump_2 = float(diff2.loc[jump_year_2]) if jump_year_2 in diff2.index else 0.0
+
+    def describe_shape(series, cluster_id):
+        vals = series.values.astype(float)
+        first_half = vals[:max(2, len(vals)//2)]
+        second_half = vals[max(1, len(vals)//2):]
+        if len(vals) < 4:
+            return f"Cluster {cluster_id} shows a relatively short trajectory."
+        low_idx = int(np.argmin(vals))
+        high_idx = int(np.argmax(vals))
+        if low_idx > 1 and low_idx < len(vals) - 2 and vals[-1] > vals[low_idx] + 8:
+            return f"Cluster {cluster_id} declines early, reaches a low point around {int(series.index[low_idx])}, and then recovers strongly afterward."
+        if high_idx > 1 and high_idx < len(vals) - 2 and vals[-1] < vals[high_idx] - 8:
+            return f"Cluster {cluster_id} rises to a high point around {int(series.index[high_idx])} and then loses condition later."
+        if vals[-1] > vals[0] + 8:
+            return f"Cluster {cluster_id} shows a strong upward shift over the period."
+        if vals[-1] < vals[0] - 8:
+            return f"Cluster {cluster_id} shows a strong downward shift over the period."
+        return f"Cluster {cluster_id} remains comparatively steady after its main transition."
+
+    shape1 = describe_shape(med1, c1)
+    shape2 = describe_shape(med2, c2)
+
+    unusual_parts = []
+    if abs(jump_1) >= 10:
+        unusual_parts.append(
+            f"Cluster {c1} shows a sharp {'increase' if jump_1 > 0 else 'drop'} around {jump_year_1}, which suggests a major shift in its typical condition trajectory"
+        )
+    if abs(jump_2) >= 10:
+        unusual_parts.append(
+            f"Cluster {c2} shows a sharp {'increase' if jump_2 > 0 else 'drop'} around {jump_year_2}, which suggests a major shift in its typical condition trajectory"
+        )
+    if relation == "converge":
+        unusual_parts.append("the two clusters follow very different early trajectories but end up at very similar later-condition levels")
+
+    unusual_sentence = ""
+    if unusual_parts:
+        unusual_sentence = " The unusual pattern in this plot is that " + "; and ".join(unusual_parts) + "."
+
     text = (
-        f"This comparison plot should be read by following the two cluster median trajectories from left to right over time. "
-        f"The x-axis shows the year, and the y-axis shows the median overall Bridge Health Index for each cluster, where higher values indicate better condition. "
-        f"The blue line represents Cluster {c1}, and the orange line represents Cluster {c2}. "
-        f"When one line is above the other, that cluster has the stronger typical condition at that point in time. "
-        f"The slope of each line shows whether the cluster is improving, declining, or staying relatively stable, and the distance between the two lines shows how different their typical conditions are over time. "
-        f"In this comparison, the main pattern is that the two clusters behave differently in the early years but converge later, meaning their typical bridge conditions become much more similar over time. "
-        f"If one cluster rises sharply or changes direction more than the other, that suggests a different deterioration or recovery regime rather than just small variation."
+        f"This plot compares the median overall Bridge Health Index trajectories of Cluster {c1} and Cluster {c2} over time. "
+        f"The x-axis shows the year, and the y-axis shows median overall BHI, where higher values indicate better typical condition. "
+        f"In the early years, {early_higher} starts much higher, creating an initial gap of about {initial_gap:.2f} BHI points between the two clusters. "
+        f"Across the full period from {start_year} to {end_year}, Cluster {c1} {trend1}, while Cluster {c2} {trend2}. "
+        f"{shape1} {shape2} "
+        f"Over time, the two trajectories {relation}, so by the end of the period the gap narrows to about {final_gap:.2f} BHI points, with {late_higher} remaining slightly higher. "
+        f"The key things to watch in this comparison are which line is higher at each time point, how steeply each cluster rises or falls, and whether the two lines diverge or converge over time."
+        f"{unusual_sentence}"
     )
 
     return {
-        "text": text,
+        "text": text.strip(),
         "execution_steps": [
             "Detected a comparison-plot interpretation follow-up question.",
             "Resolved the question against the most recent two-cluster comparison context.",
-            "Interpreted the plot as a comparison of two median cluster trajectories over time.",
-            "Explained line position, slope, and convergence/divergence behavior."
+            "Computed median yearly trajectories for both clusters.",
+            "Compared early and late condition levels, directional changes, and convergence behavior.",
+            "Returned a narrative interpretation grounded in the actual plotted trajectories."
         ],
         "bridge_ids": None,
         "cluster_ids": [c1, c2],
