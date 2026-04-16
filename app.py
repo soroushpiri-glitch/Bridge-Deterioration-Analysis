@@ -1210,10 +1210,23 @@ def is_cluster_followup(question: str):
         "interpret the median",
         "interpret this plot",
         "interpret this graph",
+        "how to read this plot",
+        "how do i read this plot",
+        "how to read this graph",
+        "explain this plot",
+        "explain this graph",
+        "read this plot",
+        "read this graph",
         "fluctuations in bhi",
         "fluctuations over time",
         "variation over time",
-        "what do the fluctuations mean"
+        "what do the fluctuations mean",
+        "why does this cluster",
+        "why is this cluster",
+        "why does it behave this way",
+        "why does it behave like this",
+        "what explains this behavior",
+        "what might explain this behavior"
     ]
 
     return any(p in q for p in phrases)
@@ -1227,7 +1240,14 @@ def resolve_cluster_followup_intent(question: str):
         "median line",
         "interpret the median",
         "interpret this plot",
-        "interpret this graph"
+        "interpret this graph",
+        "how to read this plot",
+        "how do i read this plot",
+        "how to read this graph",
+        "explain this plot",
+        "explain this graph",
+        "read this plot",
+        "read this graph"
     ]):
         return "cluster_median_interpretation"
 
@@ -1238,6 +1258,16 @@ def resolve_cluster_followup_intent(question: str):
         "what do the fluctuations mean"
     ]):
         return "cluster_fluctuation_interpretation"
+
+    if any(p in q for p in [
+        "why does this cluster",
+        "why is this cluster",
+        "why does it behave this way",
+        "why does it behave like this",
+        "what explains this behavior",
+        "what might explain this behavior"
+    ]):
+        return "cluster_behavior_explanation"
 
     if any(p in q for p in [
         "interesting analysis",
@@ -2875,14 +2905,22 @@ def route_question(question: str):
             "median line",
             "interpret the median",
             "interpret this plot",
-            "interpret this graph"
+            "interpret this graph",
+            "how to read this plot",
+            "how do i read this plot",
+            "how to read this graph",
+            "explain this plot",
+            "explain this graph",
+            "read this plot",
+            "read this graph"
         ])
     ):
         return {
             "mode": "direct_text",
             "text": interpret_cluster_trend(cluster_ids_local[0]),
             "cluster_ids": [cluster_ids_local[0]],
-            "label": "cluster_median_interpretation"
+            "label": "cluster_median_interpretation",
+            "figure": make_cluster_median_figure(cluster_ids_local[0])
         }
 
     if (
@@ -2898,7 +2936,8 @@ def route_question(question: str):
             "mode": "direct_text",
             "text": interpret_cluster_fluctuations(cluster_ids_local[0]),
             "cluster_ids": [cluster_ids_local[0]],
-            "label": "cluster_fluctuation_interpretation"
+            "label": "cluster_fluctuation_interpretation",
+            "figure": make_cluster_median_figure(cluster_ids_local[0])
         }
 
     if (
@@ -2941,6 +2980,18 @@ def route_question(question: str):
                 f"- Compare to cluster 2"
             ),
             "pending_compare_cluster": cluster_ids_local[0]
+        }
+
+    if (
+        len(cluster_ids_local) >= 2 and
+        any(x in q for x in ["why", "different", "more stable", "less stable", "at risk", "riskier", "unusual behavior"])
+    ):
+        return {
+            "mode": "direct_text",
+            "text": explain_cluster_comparison(cluster_ids_local[0], cluster_ids_local[1]),
+            "cluster_ids": [cluster_ids_local[0], cluster_ids_local[1]],
+            "label": "cluster_comparison_explanation",
+            "figure": make_compare_clusters_figure(cluster_ids_local[0], cluster_ids_local[1])
         }
 
     if len(cluster_ids_local) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
@@ -3823,6 +3874,28 @@ def answer_question(question):
                 "label": "cluster_fluctuation_interpretation"
             }
 
+        if intent == "cluster_behavior_explanation":
+            fig = make_cluster_median_figure(cluster_id)
+            return {
+                "text": explain_cluster_behavior(cluster_id),
+                "figure": fig,
+                "summary_df": None,
+                "cluster_df": None,
+                "pc1_table": None,
+                "schema_df": None,
+                "column_df": None,
+                "values_df": None,
+                "preview_df": None,
+                "browse_df": None,
+                "analysis_df": None,
+                "generated_code": None,
+                "execution_steps": None,
+                "stdout": None,
+                "bridge_ids": None,
+                "cluster_ids": [cluster_id],
+                "label": "cluster_behavior_explanation"
+            }
+
         if intent == "cluster_pca":
             result = execute_tool("cluster_pca_drivers", {"cluster_id": cluster_id, "top_n": 8})
             fig = None
@@ -4008,7 +4081,7 @@ def answer_question(question):
         st.session_state.pending_compare_cluster = routed.get("pending_compare_cluster")
         return {
             "text": routed["text"],
-            "figure": None,
+            "figure": routed.get("figure"),
             "summary_df": None,
             "cluster_df": None,
             "pc1_table": None,
