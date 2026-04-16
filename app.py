@@ -1213,27 +1213,19 @@ def is_cluster_followup(question: str):
         "how to read this plot",
         "how do i read this plot",
         "how to read this graph",
-        "how do i read this graph",
         "help me interpret this plot",
-        "can you help me interpret this plot",
         "help me with interpreting this plot",
+        "can you help me interpret this plot",
         "explain this plot",
         "explain this graph",
         "what does this plot mean",
         "what does this graph mean",
-        "how should i interpret this",
-        "can you explain this figure",
-        "help me understand this cluster plot",
+        "help me understand this plot",
+        "help me understand this graph",
         "fluctuations in bhi",
         "fluctuations over time",
         "variation over time",
-        "what do the fluctuations mean",
-        "why does this cluster behave this way",
-        "why does this cluster behave like this",
-        "why is this cluster behaving this way",
-        "why is this cluster unusual",
-        "why is this cluster stable",
-        "why is this cluster declining"
+        "what do the fluctuations mean"
     ]
 
     return any(p in q for p in phrases)
@@ -1251,17 +1243,15 @@ def resolve_cluster_followup_intent(question: str):
         "how to read this plot",
         "how do i read this plot",
         "how to read this graph",
-        "how do i read this graph",
         "help me interpret this plot",
-        "can you help me interpret this plot",
         "help me with interpreting this plot",
+        "can you help me interpret this plot",
         "explain this plot",
         "explain this graph",
         "what does this plot mean",
         "what does this graph mean",
-        "how should i interpret this",
-        "can you explain this figure",
-        "help me understand this cluster plot"
+        "help me understand this plot",
+        "help me understand this graph"
     ]):
         return "cluster_median_interpretation"
 
@@ -1272,18 +1262,6 @@ def resolve_cluster_followup_intent(question: str):
         "what do the fluctuations mean"
     ]):
         return "cluster_fluctuation_interpretation"
-
-    if any(p in q for p in [
-        "why does this cluster behave this way",
-        "why does this cluster behave like this",
-        "why is this cluster behaving this way",
-        "why is this cluster unusual",
-        "why is this cluster stable",
-        "why is this cluster declining",
-        "why does this happen",
-        "why is this happening"
-    ]):
-        return "cluster_behavior_explanation"
 
     if any(p in q for p in [
         "interesting analysis",
