@@ -1134,8 +1134,8 @@ def has_bridge_context():
     return bool(ctx.get("bridge_ids"))
 
 def has_cluster_context():
-    ctx = st.session_state.last_result_context
-    return bool(ctx.get("cluster_ids"))
+    ctx = st.session_state.get("last_result_context")
+    return ctx is not None and "cluster_ids" in ctx and len(ctx["cluster_ids"]) > 0
 
 
 def is_contextual_followup(question: str):
@@ -3374,6 +3374,10 @@ def execute_tool(tool_name, tool_input):
 
     if tool_name == "cluster_summary":
         cluster_id = int(tool_input["cluster_id"])
+        st.session_state["last_result_context"] = {
+            "type": "cluster",
+            "cluster_ids": [cluster_id]
+        }
         return {
             "text": get_cluster_summary(cluster_id),
             "cluster_id": cluster_id,
@@ -3821,148 +3825,146 @@ def answer_question(question):
             }
 
     # 1b) Handle related follow-up to prior cluster
-    if has_cluster_context() and is_cluster_followup(question):
-        prior_cluster_ids = st.session_state.last_result_context.get("cluster_ids")
-        cluster_id = prior_cluster_ids[0]
+    if is_cluster_followup(question):
+        ctx = st.session_state.get("last_result_context")
 
-        intent = resolve_cluster_followup_intent(question)
+        if ctx and "cluster_ids" in ctx:
+            cluster_id = ctx["cluster_ids"][0]
+            intent = resolve_cluster_followup_intent(question)
 
-        if intent == "cluster_median_interpretation":
-            fig = make_cluster_median_figure(cluster_id)
-            return {
-                "text": interpret_cluster_trend(cluster_id),
-                "figure": fig,
-                "summary_df": None,
-                "cluster_df": None,
-                "pc1_table": None,
-                "schema_df": None,
-                "column_df": None,
-                "values_df": None,
-                "preview_df": None,
-                "browse_df": None,
-                "analysis_df": None,
-                "generated_code": None,
-                "execution_steps": None,
-                "stdout": None,
-                "bridge_ids": None,
-                "cluster_ids": [cluster_id],
-                "label": "cluster_median_interpretation"
-            }
+            if intent == "cluster_median_interpretation":
+                fig = make_cluster_median_figure(cluster_id)
+                return {
+                    "text": interpret_cluster_trend(cluster_id),
+                    "figure": fig,
+                    "summary_df": None,
+                    "cluster_df": None,
+                    "pc1_table": None,
+                    "schema_df": None,
+                    "column_df": None,
+                    "values_df": None,
+                    "preview_df": None,
+                    "browse_df": None,
+                    "analysis_df": None,
+                    "generated_code": None,
+                    "execution_steps": None,
+                    "stdout": None,
+                    "bridge_ids": None,
+                    "cluster_ids": [cluster_id],
+                    "label": "cluster_median_interpretation"
+                }
 
-        if intent == "cluster_fluctuation_interpretation":
-            fig = make_cluster_median_figure(cluster_id)
-            return {
-                "text": interpret_cluster_fluctuations(cluster_id),
-                "figure": fig,
-                "summary_df": None,
-                "cluster_df": None,
-                "pc1_table": None,
-                "schema_df": None,
-                "column_df": None,
-                "values_df": None,
-                "preview_df": None,
-                "browse_df": None,
-                "analysis_df": None,
-                "generated_code": None,
-                "execution_steps": None,
-                "stdout": None,
-                "bridge_ids": None,
-                "cluster_ids": [cluster_id],
-                "label": "cluster_fluctuation_interpretation"
-            }
+            if intent == "cluster_fluctuation_interpretation":
+                fig = make_cluster_median_figure(cluster_id)
+                return {
+                    "text": interpret_cluster_fluctuations(cluster_id),
+                    "figure": fig,
+                    "summary_df": None,
+                    "cluster_df": None,
+                    "pc1_table": None,
+                    "schema_df": None,
+                    "column_df": None,
+                    "values_df": None,
+                    "preview_df": None,
+                    "browse_df": None,
+                    "analysis_df": None,
+                    "generated_code": None,
+                    "execution_steps": None,
+                    "stdout": None,
+                    "bridge_ids": None,
+                    "cluster_ids": [cluster_id],
+                    "label": "cluster_fluctuation_interpretation"
+                }
 
-        if intent == "cluster_behavior_explanation":
-            fig = make_cluster_median_figure(cluster_id)
-            return {
-                "text": explain_cluster_behavior(cluster_id),
-                "figure": fig,
-                "summary_df": None,
-                "cluster_df": None,
-                "pc1_table": None,
-                "schema_df": None,
-                "column_df": None,
-                "values_df": None,
-                "preview_df": None,
-                "browse_df": None,
-                "analysis_df": None,
-                "generated_code": None,
-                "execution_steps": None,
-                "stdout": None,
-                "bridge_ids": None,
-                "cluster_ids": [cluster_id],
-                "label": "cluster_behavior_explanation"
-            }
+            if intent == "cluster_pca":
+                result = execute_tool("cluster_pca_drivers", {"cluster_id": cluster_id, "top_n": 8})
+                return {
+                    "text": result.get("text"),
+                    "figure": None,
+                    "summary_df": result.get("summary_df"),
+                    "cluster_df": result.get("cluster_df"),
+                    "pc1_table": result.get("pc1_table"),
+                    "schema_df": result.get("schema_df"),
+                    "column_df": result.get("column_df"),
+                    "values_df": result.get("values_df"),
+                    "preview_df": result.get("preview_df"),
+                    "browse_df": result.get("browse_df"),
+                    "analysis_df": result.get("analysis_df"),
+                    "generated_code": result.get("generated_code"),
+                    "execution_steps": result.get("execution_steps"),
+                    "stdout": result.get("stdout"),
+                    "bridge_ids": result.get("bridge_ids"),
+                    "cluster_ids": result.get("cluster_ids"),
+                    "label": result.get("label")
+                }
 
-        if intent == "cluster_pca":
-            result = execute_tool("cluster_pca_drivers", {"cluster_id": cluster_id, "top_n": 8})
-            fig = None
-            return {
-                "text": result.get("text"),
-                "figure": fig,
-                "summary_df": result.get("summary_df"),
-                "cluster_df": result.get("cluster_df"),
-                "pc1_table": result.get("pc1_table"),
-                "schema_df": result.get("schema_df"),
-                "column_df": result.get("column_df"),
-                "values_df": result.get("values_df"),
-                "preview_df": result.get("preview_df"),
-                "browse_df": result.get("browse_df"),
-                "analysis_df": result.get("analysis_df"),
-                "generated_code": result.get("generated_code"),
-                "execution_steps": result.get("execution_steps"),
-                "stdout": result.get("stdout"),
-                "bridge_ids": result.get("bridge_ids"),
-                "cluster_ids": result.get("cluster_ids"),
-                "label": result.get("label")
-            }
+            if intent == "cluster_trend":
+                result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
+                fig = make_cluster_median_figure(cluster_id)
+                return {
+                    "text": result.get("text"),
+                    "figure": fig,
+                    "summary_df": result.get("summary_df"),
+                    "cluster_df": result.get("cluster_df"),
+                    "pc1_table": result.get("pc1_table"),
+                    "schema_df": result.get("schema_df"),
+                    "column_df": result.get("column_df"),
+                    "values_df": result.get("values_df"),
+                    "preview_df": result.get("preview_df"),
+                    "browse_df": result.get("browse_df"),
+                    "analysis_df": result.get("analysis_df"),
+                    "generated_code": result.get("generated_code"),
+                    "execution_steps": result.get("execution_steps"),
+                    "stdout": result.get("stdout"),
+                    "bridge_ids": result.get("bridge_ids"),
+                    "cluster_ids": result.get("cluster_ids"),
+                    "label": result.get("label")
+                }
 
-        if intent == "cluster_trend":
-            result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
-            fig = make_cluster_median_figure(cluster_id)
-            return {
-                "text": result.get("text"),
-                "figure": fig,
-                "summary_df": result.get("summary_df"),
-                "cluster_df": result.get("cluster_df"),
-                "pc1_table": result.get("pc1_table"),
-                "schema_df": result.get("schema_df"),
-                "column_df": result.get("column_df"),
-                "values_df": result.get("values_df"),
-                "preview_df": result.get("preview_df"),
-                "browse_df": result.get("browse_df"),
-                "analysis_df": result.get("analysis_df"),
-                "generated_code": result.get("generated_code"),
-                "execution_steps": result.get("execution_steps"),
-                "stdout": result.get("stdout"),
-                "bridge_ids": result.get("bridge_ids"),
-                "cluster_ids": result.get("cluster_ids"),
-                "label": result.get("label")
-            }
+            if intent == "cluster_summary":
+                result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
+                fig = make_cluster_median_figure(cluster_id)
+                return {
+                    "text": result.get("text"),
+                    "figure": fig,
+                    "summary_df": result.get("summary_df"),
+                    "cluster_df": result.get("cluster_df"),
+                    "pc1_table": result.get("pc1_table"),
+                    "schema_df": result.get("schema_df"),
+                    "column_df": result.get("column_df"),
+                    "values_df": result.get("values_df"),
+                    "preview_df": result.get("preview_df"),
+                    "browse_df": result.get("browse_df"),
+                    "analysis_df": result.get("analysis_df"),
+                    "generated_code": result.get("generated_code"),
+                    "execution_steps": result.get("execution_steps"),
+                    "stdout": result.get("stdout"),
+                    "bridge_ids": result.get("bridge_ids"),
+                    "cluster_ids": result.get("cluster_ids"),
+                    "label": result.get("label")
+                }
 
-        if intent == "cluster_summary":
-            result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
-            fig = make_cluster_median_figure(cluster_id)
-            return {
-                "text": result.get("text"),
-                "figure": fig,
-                "summary_df": result.get("summary_df"),
-                "cluster_df": result.get("cluster_df"),
-                "pc1_table": result.get("pc1_table"),
-                "schema_df": result.get("schema_df"),
-                "column_df": result.get("column_df"),
-                "values_df": result.get("values_df"),
-                "preview_df": result.get("preview_df"),
-                "browse_df": result.get("browse_df"),
-                "analysis_df": result.get("analysis_df"),
-                "generated_code": result.get("generated_code"),
-                "execution_steps": result.get("execution_steps"),
-                "stdout": result.get("stdout"),
-                "bridge_ids": result.get("bridge_ids"),
-                "cluster_ids": result.get("cluster_ids"),
-                "label": result.get("label")
-            }
-
-        result = execute_tool("cluster_deep_dive", {"cluster_id": cluster_id})
+            if intent == "cluster_deep_dive":
+                fig = make_cluster_median_figure(cluster_id)
+                return {
+                    "text": explain_cluster_behavior(cluster_id),
+                    "figure": fig,
+                    "summary_df": None,
+                    "cluster_df": None,
+                    "pc1_table": None,
+                    "schema_df": None,
+                    "column_df": None,
+                    "values_df": None,
+                    "preview_df": None,
+                    "browse_df": None,
+                    "analysis_df": None,
+                    "generated_code": None,
+                    "execution_steps": None,
+                    "stdout": None,
+                    "bridge_ids": None,
+                    "cluster_ids": [cluster_id],
+                    "label": "cluster_deep_dive"
+                }
         return {
             "text": result.get("text"),
             "figure": None,
