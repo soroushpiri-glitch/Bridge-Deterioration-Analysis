@@ -648,6 +648,24 @@ def extract_bridge_id_from_question(question: str):
     return None
 
 
+def is_explicit_single_bridge_trend_request(question: str):
+    q = question.lower().strip()
+
+    trend_phrases = [
+        "show trend for bridge",
+        "trend for bridge",
+        "show me the trend for bridge",
+        "plot trend for bridge",
+        "show bridge trend",
+        "show the trend for bridge"
+    ]
+
+    has_trend_phrase = any(p in q for p in trend_phrases)
+    has_bridge_id = extract_bridge_id_from_question(question) is not None
+
+    return has_trend_phrase and has_bridge_id
+
+
 def is_forecast_explanation_question(question: str):
     q = question.lower().strip()
     phrases = [
@@ -1185,8 +1203,11 @@ def is_contextual_followup(question: str):
         "average of these bridges",
         "average of them",
         "trend for these",
-        "show trend",
-        "plot trend",
+        "trend for those",
+        "show their trend",
+        "plot their trend",
+        "show trend for these",
+        "show trend for those",
         "compare them",
         "compare these bridges",
         "rank them",
@@ -1690,8 +1711,8 @@ def resolve_followup_intent(question: str):
     q = question.lower().strip()
 
     if any(p in q for p in [
-        "trend for these", "trend for those", "show their trend", "show me the trend",
-        "plot trend", "plot the trend", "show trend", "trend for them"
+        "trend for these", "trend for those", "show their trend",
+        "plot their trend", "show trend for these", "show trend for those", "trend for them"
     ]):
         return "multi_trend"
 
@@ -4188,7 +4209,36 @@ def answer_question(question):
     bridge_ids_ctx = ctx.get("bridge_ids") if isinstance(ctx, dict) else None
     cluster_ids_ctx = ctx.get("cluster_ids") if isinstance(ctx, dict) else None
 
-    # 0) Highest-priority follow-up for recent result
+    # 0) Explicit single-bridge trend request should override prior subset context
+    if is_explicit_single_bridge_trend_request(question):
+        bridge_id = extract_bridge_id_from_question(question)
+        if bridge_id is not None:
+            result = execute_tool("bridge_trend", {"bridge_id": bridge_id})
+            fig = result.get("figure")
+            if fig is None:
+                fig = make_bridge_trend_figure(bridge_id)
+
+            return {
+                "text": result.get("text"),
+                "figure": fig,
+                "summary_df": result.get("summary_df"),
+                "cluster_df": result.get("cluster_df"),
+                "pc1_table": result.get("pc1_table"),
+                "schema_df": result.get("schema_df"),
+                "column_df": result.get("column_df"),
+                "values_df": result.get("values_df"),
+                "preview_df": result.get("preview_df"),
+                "browse_df": result.get("browse_df"),
+                "analysis_df": result.get("analysis_df"),
+                "generated_code": result.get("generated_code"),
+                "execution_steps": result.get("execution_steps"),
+                "stdout": result.get("stdout"),
+                "bridge_ids": [bridge_id],
+                "cluster_ids": None,
+                "label": "bridge_trend_single"
+            }
+
+    # 1) Highest-priority follow-up for recent result
     if (
         is_bridge_behavior_followup(question) or
         is_bridge_status_followup(question) or
