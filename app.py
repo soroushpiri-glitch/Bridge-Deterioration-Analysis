@@ -1253,31 +1253,24 @@ def interpret_bridge_trend(bridge_id):
         else "stable"
     )
 
-    return (
-        f"For bridge {matched}, read the plot from left to right as change in overall BHI over time.
+    return f"""For bridge {matched}, read the plot from left to right as change in overall BHI over time.
 
-"
-        f"- The x-axis shows the year.
-"
-        f"- The y-axis shows the Bridge Health Index (Overall), where higher values mean better condition.
-"
-        f"- Each point shows the bridge condition in that year, and the connected line shows the long-term trend.
+- The x-axis shows the year.
+- The y-axis shows the Bridge Health Index (Overall), where higher values mean better condition.
+- Each point shows the bridge condition in that year, and the connected line shows the long-term trend.
 
-"
-        f"For this bridge, the trend is overall {direction}. "
-        f"The BHI changes from {first_bhi:.2f} in {first_year} to {last_bhi:.2f} in {last_year}, "
-        f"for a net change of {net_change:.2f} points. "
-        f"The estimated slope is {slope:.3f} BHI points per year.
+For this bridge, the trend is overall {direction}.
+The BHI changes from {first_bhi:.2f} in {first_year} to {last_bhi:.2f} in {last_year},
+for a net change of {net_change:.2f} points.
+The estimated slope is {slope:.3f} BHI points per year.
 
-"
-        f"The highest observed BHI is {values[highest_idx]:.2f} in {int(years_local[highest_idx])}, "
-        f"and the lowest is {values[lowest_idx]:.2f} in {int(years_local[lowest_idx])}.
+The highest observed BHI is {values[highest_idx]:.2f} in {int(years_local[highest_idx])},
+and the lowest is {values[lowest_idx]:.2f} in {int(years_local[lowest_idx])}.
 
-"
-        f"If the line drops, the bridge is deteriorating. "
-        f"If it flattens, the condition is relatively stable. "
-        f"If it rises, that can indicate recovery, rehabilitation, or improved condition ratings."
-    )
+If the line drops, the bridge is deteriorating.
+If it flattens, the condition is relatively stable.
+If it rises, that can indicate recovery, rehabilitation, or improved condition ratings.
+"""
 
 def is_cluster_followup(question: str):
     q = question.lower().strip()
