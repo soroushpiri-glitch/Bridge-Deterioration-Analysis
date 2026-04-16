@@ -1135,7 +1135,7 @@ def has_bridge_context():
 
 def has_cluster_context():
     ctx = st.session_state.get("last_result_context")
-    return ctx is not None and "cluster_ids" in ctx and isinstance(ctx.get("cluster_ids"), list) and len(ctx["cluster_ids"]) > 0
+    return ctx is not None and "cluster_ids" in ctx and len(ctx["cluster_ids"]) > 0
 
 
 def is_contextual_followup(question: str):
@@ -1299,79 +1299,6 @@ def resolve_cluster_followup_intent(question: str):
         return "cluster_summary"
 
     return "cluster_deep_dive"
-
-
-def is_bridge_plot_followup(question: str):
-    q = question.lower().strip()
-    phrases = [
-        "explain this plot",
-        "how to read this plot",
-        "how do i read this plot",
-        "help me with interpreting this plot",
-        "help me interpret this plot",
-        "interpret this plot",
-        "what does this plot mean",
-        "help me understand this plot",
-        "explain this graph",
-        "how to read this graph",
-        "how do i read this graph",
-        "interpret this graph",
-        "what does this graph mean",
-        "help me understand this graph",
-        "explain this trend",
-        "how to read this trend",
-        "interpret this trend"
-    ]
-    return any(p in q for p in phrases)
-
-
-def is_any_plot_followup(question: str):
-    return is_bridge_plot_followup(question) or is_cluster_followup(question)
-
-
-def interpret_bridge_trend(bridge_id):
-    matched = find_best_bridge_match(bridge_id)
-    if matched is None or matched not in pivot_df.index:
-        return f"I could not find time-series data for bridge {bridge_id}."
-
-    row = pivot_df.loc[matched].dropna()
-    if len(row) < 2:
-        return f"Bridge {matched} does not have enough data to interpret its trend."
-
-    x = np.array(row.index.tolist(), dtype=float)
-    y = np.array(row.values, dtype=float)
-    slope, _, _, _, _ = linregress(x, y)
-    net_change = float(y[-1] - y[0])
-    latest_bhi = float(y[-1])
-    max_drop = float(np.min(np.diff(y))) if len(y) >= 2 else 0.0
-
-    if slope <= -0.5:
-        trend_desc = "a clear long-term decline"
-    elif slope < -0.1:
-        trend_desc = "a gradual decline"
-    elif slope < 0.1:
-        trend_desc = "a mostly stable pattern"
-    else:
-        trend_desc = "an overall improving pattern"
-
-    if latest_bhi >= 90:
-        condition_desc = "relatively strong in the most recent years"
-    elif latest_bhi >= 75:
-        condition_desc = "moderate in the most recent years"
-    else:
-        condition_desc = "weaker in the most recent years"
-
-    step_change_text = ""
-    if max_drop <= -2.0:
-        step_change_text = " The line also shows one or more noticeable step drops, which suggests discrete condition changes or inspection-cycle updates rather than a perfectly smooth deterioration path."
-
-    return (
-        f"For bridge {matched}, this plot should be read as the year-by-year Bridge Health Index trajectory for one bridge. "
-        f"The line shows {trend_desc}, with an estimated slope of {slope:.3f} BHI points per year and a net change of {net_change:.2f} points over the observed period. "
-        f"The most recent BHI is {latest_bhi:.2f}, which means the bridge appears {condition_desc}. "
-        f"Flat segments indicate years when the reported BHI stayed the same, while downward jumps indicate periods when the bridge condition worsened." 
-        f"{step_change_text}"
-    )
 
 
 def resolve_followup_intent(question: str):
@@ -3447,6 +3374,10 @@ def execute_tool(tool_name, tool_input):
 
     if tool_name == "cluster_summary":
         cluster_id = int(tool_input["cluster_id"])
+        st.session_state["last_result_context"] = {
+            "type": "cluster",
+            "cluster_ids": [cluster_id]
+        }
         return {
             "text": get_cluster_summary(cluster_id),
             "cluster_id": cluster_id,
@@ -3868,43 +3799,66 @@ def ask_bedrock_with_tools(user_prompt):
 # Main answer router
 # ---------------------------
 def answer_question(question):
-    ctx = st.session_state.get("last_result_context")
-    bridge_ids_ctx = ctx.get("bridge_ids") if isinstance(ctx, dict) else None
-    cluster_ids_ctx = ctx.get("cluster_ids") if isinstance(ctx, dict) else None
-
-    # 0) Highest-priority handler for "this plot / this graph / this trend"
-    # Resolve against the most recent bridge or cluster context before any generic route.
-    if is_any_plot_followup(question):
-        if isinstance(bridge_ids_ctx, list) and len(bridge_ids_ctx) == 1:
-            bridge_id = bridge_ids_ctx[0]
+    # 1) Handle general related follow-up to prior bridge subset
+    if has_bridge_context() and is_contextual_followup(question):
+        prior_bridge_ids = st.session_state.last_result_context.get("bridge_ids")
+        subset_result = analyze_bridge_subset(question, prior_bridge_ids)
+        if subset_result is not None:
             return {
-                "text": interpret_bridge_trend(bridge_id),
-                "figure": make_bridge_trend_figure(bridge_id),
-                "summary_df": None,
-                "cluster_df": None,
-                "pc1_table": None,
-                "schema_df": None,
-                "column_df": None,
-                "values_df": None,
-                "preview_df": None,
-                "browse_df": None,
-                "analysis_df": None,
-                "generated_code": None,
-                "execution_steps": None,
-                "stdout": None,
-                "bridge_ids": [bridge_id],
-                "cluster_ids": None,
-                "label": "bridge_trend_interpretation"
+                "text": subset_result.get("text"),
+                "figure": subset_result.get("figure"),
+                "summary_df": subset_result.get("summary_df"),
+                "cluster_df": subset_result.get("cluster_df"),
+                "pc1_table": subset_result.get("pc1_table"),
+                "schema_df": subset_result.get("schema_df"),
+                "column_df": subset_result.get("column_df"),
+                "values_df": subset_result.get("values_df"),
+                "preview_df": subset_result.get("preview_df"),
+                "browse_df": subset_result.get("browse_df"),
+                "analysis_df": subset_result.get("analysis_df"),
+                "generated_code": subset_result.get("generated_code"),
+                "execution_steps": subset_result.get("execution_steps"),
+                "stdout": subset_result.get("stdout"),
+                "bridge_ids": subset_result.get("bridge_ids"),
+                "cluster_ids": subset_result.get("cluster_ids"),
+                "label": subset_result.get("label")
             }
 
-        if isinstance(cluster_ids_ctx, list) and len(cluster_ids_ctx) > 0:
-            cluster_id = cluster_ids_ctx[0]
+    # 1b) Handle related follow-up to prior cluster
+    if is_cluster_followup(question):
+        ctx = st.session_state.get("last_result_context")
+
+        if ctx and "cluster_ids" in ctx:
+            cluster_id = ctx["cluster_ids"][0]
             intent = resolve_cluster_followup_intent(question)
 
+            if intent == "cluster_median_interpretation":
+                fig = make_cluster_median_figure(cluster_id)
+                return {
+                    "text": interpret_cluster_trend(cluster_id),
+                    "figure": fig,
+                    "summary_df": None,
+                    "cluster_df": None,
+                    "pc1_table": None,
+                    "schema_df": None,
+                    "column_df": None,
+                    "values_df": None,
+                    "preview_df": None,
+                    "browse_df": None,
+                    "analysis_df": None,
+                    "generated_code": None,
+                    "execution_steps": None,
+                    "stdout": None,
+                    "bridge_ids": None,
+                    "cluster_ids": [cluster_id],
+                    "label": "cluster_median_interpretation"
+                }
+
             if intent == "cluster_fluctuation_interpretation":
+                fig = make_cluster_median_figure(cluster_id)
                 return {
                     "text": interpret_cluster_fluctuations(cluster_id),
-                    "figure": make_cluster_median_figure(cluster_id),
+                    "figure": fig,
                     "summary_df": None,
                     "cluster_df": None,
                     "pc1_table": None,
@@ -3944,11 +3898,12 @@ def answer_question(question):
                     "label": result.get("label")
                 }
 
-            if intent == "cluster_summary":
+            if intent == "cluster_trend":
                 result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
+                fig = make_cluster_median_figure(cluster_id)
                 return {
                     "text": result.get("text"),
-                    "figure": make_cluster_median_figure(cluster_id),
+                    "figure": fig,
                     "summary_df": result.get("summary_df"),
                     "cluster_df": result.get("cluster_df"),
                     "pc1_table": result.get("pc1_table"),
@@ -3966,10 +3921,34 @@ def answer_question(question):
                     "label": result.get("label")
                 }
 
-            if intent in ["cluster_deep_dive", "cluster_behavior_explanation"]:
+            if intent == "cluster_summary":
+                result = execute_tool("cluster_summary", {"cluster_id": cluster_id})
+                fig = make_cluster_median_figure(cluster_id)
+                return {
+                    "text": result.get("text"),
+                    "figure": fig,
+                    "summary_df": result.get("summary_df"),
+                    "cluster_df": result.get("cluster_df"),
+                    "pc1_table": result.get("pc1_table"),
+                    "schema_df": result.get("schema_df"),
+                    "column_df": result.get("column_df"),
+                    "values_df": result.get("values_df"),
+                    "preview_df": result.get("preview_df"),
+                    "browse_df": result.get("browse_df"),
+                    "analysis_df": result.get("analysis_df"),
+                    "generated_code": result.get("generated_code"),
+                    "execution_steps": result.get("execution_steps"),
+                    "stdout": result.get("stdout"),
+                    "bridge_ids": result.get("bridge_ids"),
+                    "cluster_ids": result.get("cluster_ids"),
+                    "label": result.get("label")
+                }
+
+            if intent == "cluster_deep_dive":
+                fig = make_cluster_median_figure(cluster_id)
                 return {
                     "text": explain_cluster_behavior(cluster_id),
-                    "figure": make_cluster_median_figure(cluster_id),
+                    "figure": fig,
                     "summary_df": None,
                     "cluster_df": None,
                     "pc1_table": None,
@@ -3984,53 +3963,28 @@ def answer_question(question):
                     "stdout": None,
                     "bridge_ids": None,
                     "cluster_ids": [cluster_id],
-                    "label": "cluster_behavior_explanation"
+                    "label": "cluster_deep_dive"
                 }
-
-            return {
-                "text": interpret_cluster_trend(cluster_id),
-                "figure": make_cluster_median_figure(cluster_id),
-                "summary_df": None,
-                "cluster_df": None,
-                "pc1_table": None,
-                "schema_df": None,
-                "column_df": None,
-                "values_df": None,
-                "preview_df": None,
-                "browse_df": None,
-                "analysis_df": None,
-                "generated_code": None,
-                "execution_steps": None,
-                "stdout": None,
-                "bridge_ids": None,
-                "cluster_ids": [cluster_id],
-                "label": "cluster_median_interpretation"
-            }
-
-    # 1) Handle general related follow-up to prior bridge subset
-    if has_bridge_context() and is_contextual_followup(question):
-        prior_bridge_ids = st.session_state.last_result_context.get("bridge_ids")
-        subset_result = analyze_bridge_subset(question, prior_bridge_ids)
-        if subset_result is not None:
-            return {
-                "text": subset_result.get("text"),
-                "figure": subset_result.get("figure"),
-                "summary_df": subset_result.get("summary_df"),
-                "cluster_df": subset_result.get("cluster_df"),
-                "pc1_table": subset_result.get("pc1_table"),
-                "schema_df": subset_result.get("schema_df"),
-                "column_df": subset_result.get("column_df"),
-                "values_df": subset_result.get("values_df"),
-                "preview_df": subset_result.get("preview_df"),
-                "browse_df": subset_result.get("browse_df"),
-                "analysis_df": subset_result.get("analysis_df"),
-                "generated_code": subset_result.get("generated_code"),
-                "execution_steps": subset_result.get("execution_steps"),
-                "stdout": subset_result.get("stdout"),
-                "bridge_ids": subset_result.get("bridge_ids"),
-                "cluster_ids": subset_result.get("cluster_ids"),
-                "label": subset_result.get("label")
-            }
+        return {
+            "text": result.get("text"),
+            "figure": None,
+            "summary_df": result.get("summary_df"),
+            "cluster_df": result.get("cluster_df"),
+            "pc1_table": result.get("pc1_table"),
+            "schema_df": result.get("schema_df"),
+            "column_df": result.get("column_df"),
+            "values_df": result.get("values_df"),
+            "preview_df": result.get("preview_df"),
+            "browse_df": result.get("browse_df"),
+            "analysis_df": result.get("analysis_df"),
+            "generated_code": result.get("generated_code"),
+            "execution_steps": result.get("execution_steps"),
+            "stdout": result.get("stdout"),
+            "bridge_ids": result.get("bridge_ids"),
+            "cluster_ids": result.get("cluster_ids"),
+            "label": result.get("label"),
+            "forecast_explanation": result.get("forecast_explanation")
+        }
 
     # 2) Existing cluster pending compare
     pending_base = st.session_state.pending_compare_cluster
@@ -4126,7 +4080,7 @@ def answer_question(question):
         st.session_state.pending_compare_cluster = routed.get("pending_compare_cluster")
         return {
             "text": routed["text"],
-            "figure": routed.get("figure"),
+            "figure": None,
             "summary_df": None,
             "cluster_df": None,
             "pc1_table": None,
@@ -4139,7 +4093,7 @@ def answer_question(question):
             "generated_code": None,
             "execution_steps": None,
             "stdout": None,
-            "bridge_ids": routed.get("bridge_ids"),
+            "bridge_ids": None,
             "cluster_ids": routed.get("cluster_ids"),
             "label": routed.get("label")
         }
