@@ -1353,6 +1353,157 @@ def is_bridge_behavior_followup(question: str):
     return any(p in q for p in phrases)
 
 
+
+
+def is_cluster_comparison_followup(question: str):
+    q = question.lower().strip()
+
+    phrases = [
+        "unusual behavior",
+        "what stands out",
+        "key difference",
+        "main difference",
+        "compare deeper",
+        "analyze this comparison",
+        "insight from comparison",
+        "what is interesting",
+        "what is surprising",
+        "why are they different",
+        "what unusual behavior do you see in this comparison",
+        "what unusual behavior do you see",
+        "what stands out in this comparison",
+        "explain this comparison",
+        "analyze the comparison"
+    ]
+
+    return any(p in q for p in phrases)
+
+
+def analyze_cluster_comparison(cluster_ids):
+    if cluster_ids is None or len(cluster_ids) < 2:
+        return {
+            "text": "I need two cluster IDs to analyze the comparison.",
+            "cluster_ids": cluster_ids,
+            "label": "cluster_comparison_analysis_missing"
+        }
+
+    c1, c2 = int(cluster_ids[0]), int(cluster_ids[1])
+    df1 = bridge_summary[bridge_summary["Cluster"] == c1].copy()
+    df2 = bridge_summary[bridge_summary["Cluster"] == c2].copy()
+
+    if df1.empty or df2.empty:
+        return {
+            "text": f"I could not find enough data to compare Cluster {c1} and Cluster {c2}.",
+            "cluster_ids": [c1, c2],
+            "label": "cluster_comparison_analysis_missing"
+        }
+
+    def safe_mean(df, col):
+        if col in df.columns:
+            return pd.to_numeric(df[col], errors="coerce").mean()
+        return np.nan
+
+    bhi1 = safe_mean(df1, "Bridge Health Index (Overall)")
+    bhi2 = safe_mean(df2, "Bridge Health Index (Overall)")
+    slope1 = safe_mean(df1, "deterioration_slope_per_year")
+    slope2 = safe_mean(df2, "deterioration_slope_per_year")
+    adt1 = safe_mean(df1, "ADT_029")
+    adt2 = safe_mean(df2, "ADT_029")
+    span1 = safe_mean(df1, "MAX_SPAN_LEN_MT_048")
+    span2 = safe_mean(df2, "MAX_SPAN_LEN_MT_048")
+
+    slope_text = ""
+    if pd.notna(slope1) and pd.notna(slope2):
+        if slope1 > slope2:
+            slope_text = (
+                f"Cluster {c1} shows the stronger positive overall slope ({slope1:.3f} vs {slope2:.3f}), "
+                f"which suggests faster improvement or recovery in the typical bridges in that cluster. "
+            )
+        elif slope2 > slope1:
+            slope_text = (
+                f"Cluster {c2} shows the stronger positive overall slope ({slope2:.3f} vs {slope1:.3f}), "
+                f"which suggests faster improvement or recovery in the typical bridges in that cluster. "
+            )
+        else:
+            slope_text = "Both clusters have very similar overall slopes, so their long-term directional behavior is comparable. "
+
+    bhi_text = ""
+    if pd.notna(bhi1) and pd.notna(bhi2):
+        if bhi1 > bhi2:
+            bhi_text = f"Cluster {c1} has the better latest overall condition on average ({bhi1:.2f} vs {bhi2:.2f}). "
+        elif bhi2 > bhi1:
+            bhi_text = f"Cluster {c2} has the better latest overall condition on average ({bhi2:.2f} vs {bhi1:.2f}). "
+        else:
+            bhi_text = "Both clusters have nearly the same latest overall BHI on average. "
+
+    traffic_text = ""
+    if pd.notna(adt1) and pd.notna(adt2):
+        if abs(adt1 - adt2) > 1e-9:
+            higher = c1 if adt1 > adt2 else c2
+            traffic_text = (
+                f"A notable contrast is traffic demand: Cluster {higher} carries substantially higher average ADT "
+                f"({max(adt1, adt2):.1f} vs {min(adt1, adt2):.1f}). "
+            )
+
+    span_text = ""
+    if pd.notna(span1) and pd.notna(span2):
+        if abs(span1 - span2) > 1e-9:
+            longer = c1 if span1 > span2 else c2
+            span_text = (
+                f"There is also a geometric difference: Cluster {longer} has longer average maximum spans "
+                f"({max(span1, span2):.2f} m vs {min(span1, span2):.2f} m). "
+            )
+
+    unusual = ""
+    if pd.notna(bhi1) and pd.notna(bhi2) and pd.notna(slope1) and pd.notna(slope2):
+        if bhi1 < bhi2 and slope1 > slope2:
+            unusual = (
+                f"The unusual behavior in this comparison is that Cluster {c1} currently has the weaker condition, "
+                f"but it is improving faster than Cluster {c2}. That mismatch may suggest recovery from prior deterioration, "
+                f"rehabilitation effects, or a cluster with more volatile historical behavior. "
+            )
+        elif bhi2 < bhi1 and slope2 > slope1:
+            unusual = (
+                f"The unusual behavior in this comparison is that Cluster {c2} currently has the weaker condition, "
+                f"but it is improving faster than Cluster {c1}. That mismatch may suggest recovery from prior deterioration, "
+                f"rehabilitation effects, or a cluster with more volatile historical behavior. "
+            )
+        else:
+            unusual = (
+                "The most notable pattern is that condition and slope generally move in the same direction, so the comparison looks more consistent than contradictory. "
+            )
+
+    text = (
+        f"When comparing Cluster {c1} and Cluster {c2}, several patterns stand out. "
+        + bhi_text + slope_text + traffic_text + span_text + unusual +
+        "From the comparison alone, these differences suggest that the two clusters represent distinct deterioration regimes rather than minor variation within the same bridge group."
+    )
+
+    return {
+        "text": text.strip(),
+        "analysis_df": pd.DataFrame([{
+            "Cluster 1": c1,
+            "Cluster 2": c2,
+            "Avg Latest BHI 1": round(bhi1, 2) if pd.notna(bhi1) else np.nan,
+            "Avg Latest BHI 2": round(bhi2, 2) if pd.notna(bhi2) else np.nan,
+            "Avg Slope 1": round(slope1, 3) if pd.notna(slope1) else np.nan,
+            "Avg Slope 2": round(slope2, 3) if pd.notna(slope2) else np.nan,
+            "Avg ADT 1": round(adt1, 1) if pd.notna(adt1) else np.nan,
+            "Avg ADT 2": round(adt2, 1) if pd.notna(adt2) else np.nan,
+            "Avg Span 1": round(span1, 2) if pd.notna(span1) else np.nan,
+            "Avg Span 2": round(span2, 2) if pd.notna(span2) else np.nan
+        }]),
+        "execution_steps": [
+            "Detected a cluster comparison follow-up question.",
+            "Resolved the question against the most recent two-cluster comparison context.",
+            "Compared average current condition, slope, traffic demand, and span length.",
+            "Returned an analytical interpretation focused on unusual comparative behavior."
+        ],
+        "bridge_ids": None,
+        "cluster_ids": [c1, c2],
+        "label": "cluster_comparison_analysis"
+    }
+
 def interpret_bridge_trend(bridge_id):
     matched = find_best_bridge_match(bridge_id)
     if matched is None:
@@ -4208,6 +4359,34 @@ def answer_question(question):
     ctx = st.session_state.get("last_result_context", {})
     bridge_ids_ctx = ctx.get("bridge_ids") if isinstance(ctx, dict) else None
     cluster_ids_ctx = ctx.get("cluster_ids") if isinstance(ctx, dict) else None
+
+    # 0) Cluster comparison follow-up should take precedence over bridge follow-ups
+    if (
+        is_cluster_comparison_followup(question)
+        and isinstance(cluster_ids_ctx, list)
+        and len(cluster_ids_ctx) == 2
+    ):
+        result = analyze_cluster_comparison(cluster_ids_ctx)
+        fig = make_compare_clusters_figure(cluster_ids_ctx[0], cluster_ids_ctx[1]) if 'make_compare_clusters_figure' in globals() else None
+        return {
+            "text": result.get("text"),
+            "figure": fig,
+            "summary_df": None,
+            "cluster_df": None,
+            "pc1_table": None,
+            "schema_df": None,
+            "column_df": None,
+            "values_df": None,
+            "preview_df": None,
+            "browse_df": None,
+            "analysis_df": result.get("analysis_df"),
+            "generated_code": None,
+            "execution_steps": result.get("execution_steps"),
+            "stdout": None,
+            "bridge_ids": None,
+            "cluster_ids": result.get("cluster_ids"),
+            "label": result.get("label")
+        }
 
     # 0) Explicit single-bridge trend request should override prior subset context
     if is_explicit_single_bridge_trend_request(question):
