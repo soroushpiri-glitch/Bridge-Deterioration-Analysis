@@ -666,6 +666,28 @@ def is_explicit_single_bridge_trend_request(question: str):
     return has_trend_phrase and has_bridge_id
 
 
+def is_cluster_comparison_plot_followup(question: str):
+    q = question.lower().strip()
+
+    phrases = [
+        "how to read this plot",
+        "how do i read this plot",
+        "how to read this graph",
+        "how do i read this graph",
+        "interpret this comparison plot",
+        "interpret this comparison graph",
+        "explain this comparison plot",
+        "explain this comparison graph",
+        "what does this comparison plot mean",
+        "what does this comparison graph mean",
+        "help me understand this comparison",
+        "how should i interpret this comparison",
+        "explain this plot comparison"
+    ]
+
+    return any(p in q for p in phrases)
+
+
 def is_forecast_explanation_question(question: str):
     q = question.lower().strip()
     phrases = [
@@ -3198,6 +3220,50 @@ def make_compare_clusters_figure(cluster_id_1, cluster_id_2):
     fig.tight_layout()
     return fig
 
+def interpret_cluster_comparison_plot(cluster_ids):
+    if cluster_ids is None or len(cluster_ids) < 2:
+        return {
+            "text": "I need two cluster IDs to interpret this comparison plot.",
+            "cluster_ids": cluster_ids,
+            "label": "cluster_comparison_plot_missing"
+        }
+
+    c1, c2 = int(cluster_ids[0]), int(cluster_ids[1])
+
+    df1 = bridge_summary[bridge_summary["Cluster"] == c1].copy()
+    df2 = bridge_summary[bridge_summary["Cluster"] == c2].copy()
+
+    if df1.empty or df2.empty:
+        return {
+            "text": f"I could not find enough data to interpret the comparison between Cluster {c1} and Cluster {c2}.",
+            "cluster_ids": [c1, c2],
+            "label": "cluster_comparison_plot_missing"
+        }
+
+    text = (
+        f"This comparison plot should be read by following the two cluster median trajectories from left to right over time. "
+        f"The x-axis shows the year, and the y-axis shows the median overall Bridge Health Index for each cluster, where higher values indicate better condition. "
+        f"The blue line represents Cluster {c1}, and the orange line represents Cluster {c2}. "
+        f"When one line is above the other, that cluster has the stronger typical condition at that point in time. "
+        f"The slope of each line shows whether the cluster is improving, declining, or staying relatively stable, and the distance between the two lines shows how different their typical conditions are over time. "
+        f"In this comparison, the main pattern is that the two clusters behave differently in the early years but converge later, meaning their typical bridge conditions become much more similar over time. "
+        f"If one cluster rises sharply or changes direction more than the other, that suggests a different deterioration or recovery regime rather than just small variation."
+    )
+
+    return {
+        "text": text,
+        "execution_steps": [
+            "Detected a comparison-plot interpretation follow-up question.",
+            "Resolved the question against the most recent two-cluster comparison context.",
+            "Interpreted the plot as a comparison of two median cluster trajectories over time.",
+            "Explained line position, slope, and convergence/divergence behavior."
+        ],
+        "bridge_ids": None,
+        "cluster_ids": [c1, c2],
+        "label": "cluster_comparison_plot_interpretation"
+    }
+
+
 # ---------------------------
 # Bedrock prompt + tools
 # ---------------------------
@@ -3799,6 +3865,8 @@ def execute_tool(tool_name, tool_input):
             "text": compare_two_clusters(cluster_id_1, cluster_id_2),
             "cluster_id_1": cluster_id_1,
             "cluster_id_2": cluster_id_2,
+            "cluster_ids": [cluster_id_1, cluster_id_2],
+            "label": "compare_clusters",
             "show_compare_clusters_chart": True
         }
 
@@ -4208,8 +4276,38 @@ def answer_question(question):
     ctx = st.session_state.get("last_result_context", {})
     bridge_ids_ctx = ctx.get("bridge_ids") if isinstance(ctx, dict) else None
     cluster_ids_ctx = ctx.get("cluster_ids") if isinstance(ctx, dict) else None
+    label_ctx = ctx.get("label") if isinstance(ctx, dict) else None
 
-    # 0) Explicit single-bridge trend request should override prior subset context
+    # 0) Comparison plot interpretation should take precedence for the most recent two-cluster comparison
+    if (
+        is_cluster_comparison_plot_followup(question)
+        and isinstance(cluster_ids_ctx, list)
+        and len(cluster_ids_ctx) == 2
+        and label_ctx in ["compare_clusters", "cluster_comparison_explanation", "cluster_comparison_analysis", "cluster_comparison_plot_interpretation"]
+    ):
+        result = interpret_cluster_comparison_plot(cluster_ids_ctx)
+        fig = make_compare_clusters_figure(cluster_ids_ctx[0], cluster_ids_ctx[1])
+        return {
+            "text": result.get("text"),
+            "figure": fig,
+            "summary_df": None,
+            "cluster_df": None,
+            "pc1_table": None,
+            "schema_df": None,
+            "column_df": None,
+            "values_df": None,
+            "preview_df": None,
+            "browse_df": None,
+            "analysis_df": None,
+            "generated_code": None,
+            "execution_steps": result.get("execution_steps"),
+            "stdout": None,
+            "bridge_ids": None,
+            "cluster_ids": result.get("cluster_ids"),
+            "label": result.get("label")
+        }
+
+    # 0b) Explicit single-bridge trend request should override prior subset context
     if is_explicit_single_bridge_trend_request(question):
         bridge_id = extract_bridge_id_from_question(question)
         if bridge_id is not None:
