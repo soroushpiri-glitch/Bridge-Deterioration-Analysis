@@ -1204,7 +1204,20 @@ def is_contextual_followup(question: str):
         "trend status",
         "bridge trend status",
         "how should i classify this bridge",
-        "classify this bridge"
+        "classify this bridge",
+        "what does a sudden drop suggest",
+        "what does this drop suggest",
+        "why is there a sudden drop",
+        "why is there a sharp drop",
+        "what does a sudden jump suggest",
+        "what does this jump suggest",
+        "what is unusual about this trend",
+        "what unusual behavior do you see",
+        "analyze this trend",
+        "analyze this plot",
+        "analyze this graph",
+        "technical interpretation",
+        "explain this behavior"
     ]
 
     return (
@@ -1267,7 +1280,53 @@ def is_bridge_status_followup(question: str):
         "is this trend declining",
         "is this trend improving",
         "how should i classify this bridge",
-        "classify this bridge"
+        "classify this bridge",
+        "what does a sudden drop suggest",
+        "what does this drop suggest",
+        "why is there a sudden drop",
+        "why is there a sharp drop",
+        "what does a sudden jump suggest",
+        "what does this jump suggest",
+        "what is unusual about this trend",
+        "what unusual behavior do you see",
+        "analyze this trend",
+        "analyze this plot",
+        "analyze this graph",
+        "technical interpretation",
+        "explain this behavior"
+    ]
+
+    return any(p in q for p in phrases)
+
+
+def is_bridge_behavior_followup(question: str):
+    q = question.lower().strip()
+
+    phrases = [
+        "what does a sudden drop suggest",
+        "what does the sudden drop suggest",
+        "what does this drop suggest",
+        "what does this sudden drop suggest",
+        "why is there a sudden drop",
+        "why is there a sharp drop",
+        "why did it drop suddenly",
+        "what does a sharp drop mean",
+        "what does a sudden jump suggest",
+        "what does the sudden jump suggest",
+        "what does this jump suggest",
+        "why is there a sudden jump",
+        "why did it jump",
+        "what is unusual about this trend",
+        "what is unusual about this bridge",
+        "what unusual behavior do you see",
+        "analyze this trend",
+        "analyze this graph",
+        "analyze this plot",
+        "give me a paragraph of analysis",
+        "give me a paragraph",
+        "technical interpretation",
+        "explain this behavior",
+        "what does this behavior suggest"
     ]
 
     return any(p in q for p in phrases)
@@ -1406,6 +1465,113 @@ def classify_bridge_trend_status(bridge_id):
         "label": "bridge_status_classification"
     }
 
+
+
+def analyze_bridge_behavior(bridge_id):
+    matched = find_best_bridge_match(bridge_id)
+    if matched is None:
+        return {
+            "text": f"I could not find a matching bridge for '{bridge_id}'.",
+            "bridge_ids": None,
+            "label": "bridge_behavior_not_found"
+        }
+
+    if matched not in pivot_df.index:
+        return {
+            "text": f"No time-series data found for bridge {matched}.",
+            "bridge_ids": [matched],
+            "label": "bridge_behavior_no_data"
+        }
+
+    row = pivot_df.loc[matched].dropna()
+    if row.empty or len(row) < 2:
+        return {
+            "text": f"There is not enough trend data to analyze bridge {matched}.",
+            "bridge_ids": [matched],
+            "label": "bridge_behavior_no_data"
+        }
+
+    years_local = np.array(row.index.tolist(), dtype=int)
+    values = np.array(row.values.tolist(), dtype=float)
+
+    slope, _, _, _, _ = linregress(years_local.astype(float), values)
+
+    diffs = np.diff(values)
+    abs_diffs = np.abs(diffs)
+
+    largest_change_idx = int(np.argmax(abs_diffs))
+    largest_change = float(diffs[largest_change_idx])
+    from_year = int(years_local[largest_change_idx])
+    to_year = int(years_local[largest_change_idx + 1])
+
+    first_bhi = float(values[0])
+    last_bhi = float(values[-1])
+    net_change = last_bhi - first_bhi
+    value_range = float(np.max(values) - np.min(values))
+
+    overall_status = (
+        "improving" if slope > 0.10
+        else "declining" if slope < -0.10
+        else "stable"
+    )
+
+    if largest_change <= -5:
+        event_text = (
+            f"The most notable unusual behavior is a sudden drop of {abs(largest_change):.2f} "
+            f"BHI points between {from_year} and {to_year}. "
+            "A sudden drop like this may suggest accelerated deterioration, a major change in inspection ratings, "
+            "damage progression, or a data or assessment discontinuity. From the graph alone, the exact cause cannot be confirmed."
+        )
+    elif largest_change >= 5:
+        event_text = (
+            f"The most notable unusual behavior is a sudden increase of {largest_change:.2f} "
+            f"BHI points between {from_year} and {to_year}. "
+            "A jump like this may suggest rehabilitation, repair, replacement of critical components, "
+            "or a change in condition assessment. From the graph alone, the exact cause cannot be confirmed."
+        )
+    else:
+        event_text = (
+            "The bridge does not show a major sudden jump or drop; instead, the pattern is more gradual."
+        )
+
+    plateau_mask = abs_diffs < 0.01
+    long_flat = plateau_mask.sum() >= 4
+    flat_text = (
+        " The long flat segments suggest extended periods of relatively unchanged condition."
+        if long_flat else ""
+    )
+
+    text = (
+        f"Bridge {matched} is overall {overall_status} based on its long-term slope of {slope:.3f} "
+        f"BHI points per year, with a net change of {net_change:.2f} points from {years_local[0]} to {years_local[-1]}. "
+        f"{event_text}{flat_text} "
+        f"The overall range of the series is {value_range:.2f} BHI points, which indicates "
+        f"{'substantial variability' if value_range >= 15 else 'limited-to-moderate variability'} over time."
+    )
+
+    return {
+        "text": text,
+        "analysis_df": pd.DataFrame([{
+            "STRUCTURE_NUMBER_008": matched,
+            "Overall Status": overall_status,
+            "Slope": round(float(slope), 3),
+            "Net Change": round(float(net_change), 2),
+            "Largest Change": round(float(largest_change), 2),
+            "Largest Change From Year": from_year,
+            "Largest Change To Year": to_year,
+            "Range": round(float(value_range), 2)
+        }]),
+        "execution_steps": [
+            "Detected a bridge behavior follow-up question.",
+            "Resolved the question against the most recent single-bridge context.",
+            "Computed year-to-year changes in BHI.",
+            "Identified the largest sudden change in the series.",
+            "Produced an analytical interpretation grounded in the observed trend."
+        ],
+        "bridge_ids": [matched],
+        "cluster_ids": None,
+        "label": "bridge_behavior_analysis"
+    }
 
 def is_cluster_followup(question: str):
     q = question.lower().strip()
@@ -4024,6 +4190,7 @@ def answer_question(question):
 
     # 0) Highest-priority follow-up for recent result
     if (
+        is_bridge_behavior_followup(question) or
         is_bridge_status_followup(question) or
         is_bridge_plot_followup(question) or
         is_cluster_followup(question)
@@ -4033,6 +4200,28 @@ def answer_question(question):
         if isinstance(bridge_ids_ctx, list) and len(bridge_ids_ctx) == 1:
             bridge_id = bridge_ids_ctx[0]
             fig = make_bridge_trend_figure(bridge_id)
+
+            if is_bridge_behavior_followup(question):
+                result = analyze_bridge_behavior(bridge_id)
+                return {
+                    "text": result.get("text"),
+                    "figure": fig,
+                    "summary_df": None,
+                    "cluster_df": None,
+                    "pc1_table": None,
+                    "schema_df": None,
+                    "column_df": None,
+                    "values_df": None,
+                    "preview_df": None,
+                    "browse_df": None,
+                    "analysis_df": result.get("analysis_df"),
+                    "generated_code": None,
+                    "execution_steps": result.get("execution_steps"),
+                    "stdout": None,
+                    "bridge_ids": result.get("bridge_ids"),
+                    "cluster_ids": result.get("cluster_ids"),
+                    "label": result.get("label")
+                }
 
             if is_bridge_status_followup(question):
                 result = classify_bridge_trend_status(bridge_id)
