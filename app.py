@@ -939,20 +939,29 @@ def find_best_bridge_match(bridge_id: str):
     if not bridge_id:
         return None
 
-    candidate = str(bridge_id).strip()
-    bridge_ids_str = [str(b).strip() for b in bridge_ids]
+    candidate = str(bridge_id).strip().upper()
+    bridge_ids_str = [str(b).strip().upper() for b in bridge_ids]
 
-    exact_matches = [b for b in bridge_ids_str if b == candidate]
-    if exact_matches:
-        return exact_matches[0]
+    if candidate in bridge_ids_str:
+        return bridge_ids[bridge_ids_str.index(candidate)]
 
-    contains_matches = [b for b in bridge_ids_str if candidate in b]
-    if contains_matches:
-        return contains_matches[0]
+    candidate_norm = re.sub(r"[^A-Z0-9]", "", candidate)
+    normalized_map = {}
+    for original in bridge_ids:
+        original_str = str(original).strip()
+        norm = re.sub(r"[^A-Z0-9]", "", original_str.upper())
+        normalized_map[norm] = original_str
 
-    reverse_contains = [b for b in bridge_ids_str if b in candidate]
-    if reverse_contains:
-        return reverse_contains[0]
+    if candidate_norm in normalized_map:
+        return normalized_map[candidate_norm]
+
+    if len(candidate_norm) >= 8:
+        suffix_matches = [
+            original for norm, original in normalized_map.items()
+            if norm.endswith(candidate_norm) or candidate_norm.endswith(norm)
+        ]
+        if len(suffix_matches) == 1:
+            return suffix_matches[0]
 
     return None
 
@@ -1135,7 +1144,12 @@ def has_bridge_context():
 
 def has_cluster_context():
     ctx = st.session_state.get("last_result_context")
-    return ctx is not None and "cluster_ids" in ctx and len(ctx["cluster_ids"]) > 0
+    return (
+        ctx is not None and
+        "cluster_ids" in ctx and
+        isinstance(ctx.get("cluster_ids"), list) and
+        len(ctx["cluster_ids"]) > 0
+    )
 
 
 def is_contextual_followup(question: str):
@@ -1179,7 +1193,18 @@ def is_contextual_followup(question: str):
         "which is worst",
         "which is best",
         "fastest",
-        "slowest"
+        "slowest",
+        "is this bridge stable",
+        "is this bridge declining",
+        "is this bridge improving",
+        "is this bridge stable, declining, or improving",
+        "is it stable",
+        "is it declining",
+        "is it improving",
+        "trend status",
+        "bridge trend status",
+        "how should i classify this bridge",
+        "classify this bridge"
     ]
 
     return (
@@ -1213,6 +1238,36 @@ def is_bridge_plot_followup(question: str):
         "what does this trend mean",
         "how to interpret this trend",
         "explain this trend"
+    ]
+
+    return any(p in q for p in phrases)
+
+
+def is_bridge_status_followup(question: str):
+    q = question.lower().strip()
+
+    phrases = [
+        "is this bridge stable",
+        "is this bridge declining",
+        "is this bridge improving",
+        "is this bridge stable declining or improving",
+        "is this bridge stable, declining, or improving",
+        "is it stable",
+        "is it declining",
+        "is it improving",
+        "is this stable",
+        "is this declining",
+        "is this improving",
+        "would you call this stable",
+        "would you call this declining",
+        "would you call this improving",
+        "what is the trend status",
+        "what is this bridge trend status",
+        "is this trend stable",
+        "is this trend declining",
+        "is this trend improving",
+        "how should i classify this bridge",
+        "classify this bridge"
     ]
 
     return any(p in q for p in phrases)
@@ -1271,6 +1326,86 @@ If the line drops, the bridge is deteriorating.
 If it flattens, the condition is relatively stable.
 If it rises, that can indicate recovery, rehabilitation, or improved condition ratings.
 """
+
+def classify_bridge_trend_status(bridge_id):
+    matched = find_best_bridge_match(bridge_id)
+    if matched is None:
+        return {
+            "text": f"I could not find a matching bridge for '{bridge_id}'.",
+            "bridge_ids": None,
+            "label": "bridge_status_not_found"
+        }
+
+    if matched not in pivot_df.index:
+        return {
+            "text": f"No time-series data found for bridge {matched}.",
+            "bridge_ids": [matched],
+            "label": "bridge_status_no_data"
+        }
+
+    row = pivot_df.loc[matched].dropna()
+    if row.empty:
+        return {
+            "text": f"No valid BHI values found for bridge {matched}.",
+            "bridge_ids": [matched],
+            "label": "bridge_status_no_data"
+        }
+
+    x = np.array(row.index.tolist(), dtype=float)
+    y = np.array(row.values.tolist(), dtype=float)
+
+    if len(y) >= 2:
+        slope, _, _, _, _ = linregress(x, y)
+    else:
+        slope = 0.0
+
+    first_bhi = float(y[0])
+    last_bhi = float(y[-1])
+    net_change = last_bhi - first_bhi
+    value_range = float(np.max(y) - np.min(y))
+
+    if slope >= 0.10:
+        status = "improving"
+    elif slope <= -0.10:
+        status = "declining"
+    else:
+        status = "stable"
+
+    nuance = ""
+    if value_range >= 20:
+        nuance = (
+            " However, the trajectory is not smooth: it shows substantial changes over time, "
+            "so this bridge has mixed behavior rather than a simple steady trend."
+        )
+
+    text = (
+        f"Bridge {matched} is best classified as {status} based on its overall long-term trend. "
+        f"The estimated slope is {slope:.3f} BHI points per year, and the net change from "
+        f"{int(x[0])} to {int(x[-1])} is {net_change:.2f} points.{nuance}"
+    )
+
+    return {
+        "text": text,
+        "analysis_df": pd.DataFrame([{
+            "STRUCTURE_NUMBER_008": matched,
+            "Status": status,
+            "Slope": round(float(slope), 3),
+            "First BHI": round(first_bhi, 2),
+            "Last BHI": round(last_bhi, 2),
+            "Net Change": round(net_change, 2),
+            "Range": round(value_range, 2)
+        }]),
+        "execution_steps": [
+            "Detected a bridge-status follow-up question.",
+            "Resolved the question against the most recent single-bridge context.",
+            "Computed slope, net change, and overall variation from the bridge BHI time series.",
+            "Classified the bridge as stable, declining, or improving based on the overall slope."
+        ],
+        "bridge_ids": [matched],
+        "cluster_ids": None,
+        "label": "bridge_status_classification"
+    }
+
 
 def is_cluster_followup(question: str):
     q = question.lower().strip()
@@ -3887,38 +4022,64 @@ def answer_question(question):
     bridge_ids_ctx = ctx.get("bridge_ids") if isinstance(ctx, dict) else None
     cluster_ids_ctx = ctx.get("cluster_ids") if isinstance(ctx, dict) else None
 
-    # 0) Highest-priority follow-up for "this plot / this graph / this trend"
-    # First try single-bridge context, then cluster context
-    if is_bridge_plot_followup(question) or is_cluster_followup(question):
+    # 0) Highest-priority follow-up for recent result
+    if (
+        is_bridge_status_followup(question) or
+        is_bridge_plot_followup(question) or
+        is_cluster_followup(question)
+    ):
 
         # ----- Single bridge follow-up -----
         if isinstance(bridge_ids_ctx, list) and len(bridge_ids_ctx) == 1:
             bridge_id = bridge_ids_ctx[0]
             fig = make_bridge_trend_figure(bridge_id)
 
-            return {
-                "text": interpret_bridge_trend(bridge_id),
-                "figure": fig,
-                "summary_df": None,
-                "cluster_df": None,
-                "pc1_table": None,
-                "schema_df": None,
-                "column_df": None,
-                "values_df": None,
-                "preview_df": None,
-                "browse_df": None,
-                "analysis_df": None,
-                "generated_code": None,
-                "execution_steps": [
-                    "Detected a follow-up question about the most recent plot.",
-                    "Resolved the follow-up against the most recent single-bridge context.",
-                    "Returned a bridge-specific interpretation instead of a cluster interpretation."
-                ],
-                "stdout": None,
-                "bridge_ids": [bridge_id],
-                "cluster_ids": None,
-                "label": "bridge_trend_interpretation"
-            }
+            if is_bridge_status_followup(question):
+                result = classify_bridge_trend_status(bridge_id)
+                return {
+                    "text": result.get("text"),
+                    "figure": fig,
+                    "summary_df": None,
+                    "cluster_df": None,
+                    "pc1_table": None,
+                    "schema_df": None,
+                    "column_df": None,
+                    "values_df": None,
+                    "preview_df": None,
+                    "browse_df": None,
+                    "analysis_df": result.get("analysis_df"),
+                    "generated_code": None,
+                    "execution_steps": result.get("execution_steps"),
+                    "stdout": None,
+                    "bridge_ids": result.get("bridge_ids"),
+                    "cluster_ids": result.get("cluster_ids"),
+                    "label": result.get("label")
+                }
+
+            if is_bridge_plot_followup(question):
+                return {
+                    "text": interpret_bridge_trend(bridge_id),
+                    "figure": fig,
+                    "summary_df": None,
+                    "cluster_df": None,
+                    "pc1_table": None,
+                    "schema_df": None,
+                    "column_df": None,
+                    "values_df": None,
+                    "preview_df": None,
+                    "browse_df": None,
+                    "analysis_df": None,
+                    "generated_code": None,
+                    "execution_steps": [
+                        "Detected a follow-up question about the most recent plot.",
+                        "Resolved the follow-up against the most recent single-bridge context.",
+                        "Returned a bridge-specific interpretation instead of a cluster interpretation."
+                    ],
+                    "stdout": None,
+                    "bridge_ids": [bridge_id],
+                    "cluster_ids": None,
+                    "label": "bridge_trend_interpretation"
+                }
 
         # ----- Cluster follow-up -----
         if isinstance(cluster_ids_ctx, list) and len(cluster_ids_ctx) > 0:
