@@ -1213,20 +1213,27 @@ def is_cluster_followup(question: str):
         "how to read this plot",
         "how do i read this plot",
         "how to read this graph",
+        "how do i read this graph",
+        "help me interpret this plot",
+        "can you help me interpret this plot",
+        "help me with interpreting this plot",
         "explain this plot",
         "explain this graph",
-        "read this plot",
-        "read this graph",
+        "what does this plot mean",
+        "what does this graph mean",
+        "how should i interpret this",
+        "can you explain this figure",
+        "help me understand this cluster plot",
         "fluctuations in bhi",
         "fluctuations over time",
         "variation over time",
         "what do the fluctuations mean",
-        "why does this cluster",
-        "why is this cluster",
-        "why does it behave this way",
-        "why does it behave like this",
-        "what explains this behavior",
-        "what might explain this behavior"
+        "why does this cluster behave this way",
+        "why does this cluster behave like this",
+        "why is this cluster behaving this way",
+        "why is this cluster unusual",
+        "why is this cluster stable",
+        "why is this cluster declining"
     ]
 
     return any(p in q for p in phrases)
@@ -1244,10 +1251,17 @@ def resolve_cluster_followup_intent(question: str):
         "how to read this plot",
         "how do i read this plot",
         "how to read this graph",
+        "how do i read this graph",
+        "help me interpret this plot",
+        "can you help me interpret this plot",
+        "help me with interpreting this plot",
         "explain this plot",
         "explain this graph",
-        "read this plot",
-        "read this graph"
+        "what does this plot mean",
+        "what does this graph mean",
+        "how should i interpret this",
+        "can you explain this figure",
+        "help me understand this cluster plot"
     ]):
         return "cluster_median_interpretation"
 
@@ -1260,12 +1274,14 @@ def resolve_cluster_followup_intent(question: str):
         return "cluster_fluctuation_interpretation"
 
     if any(p in q for p in [
-        "why does this cluster",
-        "why is this cluster",
-        "why does it behave this way",
-        "why does it behave like this",
-        "what explains this behavior",
-        "what might explain this behavior"
+        "why does this cluster behave this way",
+        "why does this cluster behave like this",
+        "why is this cluster behaving this way",
+        "why is this cluster unusual",
+        "why is this cluster stable",
+        "why is this cluster declining",
+        "why does this happen",
+        "why is this happening"
     ]):
         return "cluster_behavior_explanation"
 
@@ -2909,18 +2925,25 @@ def route_question(question: str):
             "how to read this plot",
             "how do i read this plot",
             "how to read this graph",
+            "how do i read this graph",
+            "help me interpret this plot",
+            "can you help me interpret this plot",
+            "help me with interpreting this plot",
             "explain this plot",
             "explain this graph",
-            "read this plot",
-            "read this graph"
+            "what does this plot mean",
+            "what does this graph mean",
+            "how should i interpret this",
+            "can you explain this figure",
+            "help me understand this cluster plot"
         ])
     ):
         return {
             "mode": "direct_text",
             "text": interpret_cluster_trend(cluster_ids_local[0]),
+            "figure": make_cluster_median_figure(cluster_ids_local[0]),
             "cluster_ids": [cluster_ids_local[0]],
-            "label": "cluster_median_interpretation",
-            "figure": make_cluster_median_figure(cluster_ids_local[0])
+            "label": "cluster_median_interpretation"
         }
 
     if (
@@ -2935,9 +2958,9 @@ def route_question(question: str):
         return {
             "mode": "direct_text",
             "text": interpret_cluster_fluctuations(cluster_ids_local[0]),
+            "figure": make_cluster_median_figure(cluster_ids_local[0]),
             "cluster_ids": [cluster_ids_local[0]],
-            "label": "cluster_fluctuation_interpretation",
-            "figure": make_cluster_median_figure(cluster_ids_local[0])
+            "label": "cluster_fluctuation_interpretation"
         }
 
     if (
@@ -2982,19 +3005,15 @@ def route_question(question: str):
             "pending_compare_cluster": cluster_ids_local[0]
         }
 
-    if (
-        len(cluster_ids_local) >= 2 and
-        any(x in q for x in ["why", "different", "more stable", "less stable", "at risk", "riskier", "unusual behavior"])
-    ):
-        return {
-            "mode": "direct_text",
-            "text": explain_cluster_comparison(cluster_ids_local[0], cluster_ids_local[1]),
-            "cluster_ids": [cluster_ids_local[0], cluster_ids_local[1]],
-            "label": "cluster_comparison_explanation",
-            "figure": make_compare_clusters_figure(cluster_ids_local[0], cluster_ids_local[1])
-        }
-
     if len(cluster_ids_local) >= 2 and any(x in q for x in ["compare", "vs", "versus", "different"]):
+        if any(x in q for x in ["why", "analytically", "explain"]):
+            return {
+                "mode": "direct_text",
+                "text": explain_cluster_comparison(cluster_ids_local[0], cluster_ids_local[1]),
+                "figure": make_compare_clusters_figure(cluster_ids_local[0], cluster_ids_local[1]),
+                "cluster_ids": [cluster_ids_local[0], cluster_ids_local[1]],
+                "label": "cluster_comparison_explanation"
+            }
         return {
             "mode": "direct_tool",
             "tool_name": "compare_clusters",
@@ -4081,7 +4100,7 @@ def answer_question(question):
         st.session_state.pending_compare_cluster = routed.get("pending_compare_cluster")
         return {
             "text": routed["text"],
-            "figure": routed.get("figure"),
+            "figure": None,
             "summary_df": None,
             "cluster_df": None,
             "pc1_table": None,
