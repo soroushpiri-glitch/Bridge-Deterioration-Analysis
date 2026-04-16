@@ -1226,19 +1226,18 @@ def is_contextual_followup(question: str):
         "bridge trend status",
         "how should i classify this bridge",
         "classify this bridge",
-        "what does a sudden drop suggest",
-        "what does this drop suggest",
-        "why is there a sudden drop",
-        "why is there a sharp drop",
-        "what does a sudden jump suggest",
-        "what does this jump suggest",
-        "what is unusual about this trend",
-        "what unusual behavior do you see",
-        "analyze this trend",
-        "analyze this plot",
-        "analyze this graph",
-        "technical interpretation",
-        "explain this behavior"
+        "what does a sudden drop suggest in this bridge",
+        "what does this drop suggest for this bridge",
+        "why is there a sudden drop in this bridge",
+        "why is there a sharp drop in this bridge",
+        "what does a sudden jump suggest in this bridge",
+        "what does this jump suggest for this bridge",
+        "what is unusual about this bridge",
+        "analyze this bridge trend",
+        "analyze this bridge plot",
+        "analyze this bridge graph",
+        "technical interpretation of this bridge",
+        "explain this bridge behavior"
     ]
 
     return (
@@ -1301,20 +1300,7 @@ def is_bridge_status_followup(question: str):
         "is this trend declining",
         "is this trend improving",
         "how should i classify this bridge",
-        "classify this bridge",
-        "what does a sudden drop suggest",
-        "what does this drop suggest",
-        "why is there a sudden drop",
-        "why is there a sharp drop",
-        "what does a sudden jump suggest",
-        "what does this jump suggest",
-        "what is unusual about this trend",
-        "what unusual behavior do you see",
-        "analyze this trend",
-        "analyze this plot",
-        "analyze this graph",
-        "technical interpretation",
-        "explain this behavior"
+        "classify this bridge"
     ]
 
     return any(p in q for p in phrases)
@@ -1324,30 +1310,24 @@ def is_bridge_behavior_followup(question: str):
     q = question.lower().strip()
 
     phrases = [
-        "what does a sudden drop suggest",
-        "what does the sudden drop suggest",
-        "what does this drop suggest",
-        "what does this sudden drop suggest",
-        "why is there a sudden drop",
-        "why is there a sharp drop",
-        "why did it drop suddenly",
-        "what does a sharp drop mean",
-        "what does a sudden jump suggest",
-        "what does the sudden jump suggest",
-        "what does this jump suggest",
-        "why is there a sudden jump",
-        "why did it jump",
-        "what is unusual about this trend",
+        "what does a sudden drop suggest in this bridge",
+        "what does this drop suggest for this bridge",
+        "why is there a sudden drop in this bridge",
+        "why did this bridge drop suddenly",
+        "what does a sharp drop mean for this bridge",
+        "what does a sudden jump suggest in this bridge",
+        "what does this jump suggest for this bridge",
+        "why is there a sudden jump in this bridge",
+        "why did this bridge jump",
         "what is unusual about this bridge",
-        "what unusual behavior do you see",
-        "analyze this trend",
-        "analyze this graph",
-        "analyze this plot",
-        "give me a paragraph of analysis",
-        "give me a paragraph",
-        "technical interpretation",
-        "explain this behavior",
-        "what does this behavior suggest"
+        "what is unusual about this trend",
+        "analyze this bridge trend",
+        "analyze this bridge graph",
+        "analyze this bridge plot",
+        "give me a paragraph of analysis for this bridge",
+        "technical interpretation of this bridge",
+        "explain this bridge behavior",
+        "what does this behavior suggest for this bridge"
     ]
 
     return any(p in q for p in phrases)
@@ -1359,21 +1339,20 @@ def is_cluster_comparison_followup(question: str):
     q = question.lower().strip()
 
     phrases = [
-        "unusual behavior",
-        "what stands out",
-        "key difference",
-        "main difference",
+        "what unusual behavior do you see in this comparison",
+        "what stands out in this comparison",
+        "key difference in this comparison",
+        "main difference in this comparison",
         "compare deeper",
         "analyze this comparison",
+        "analyze this cluster comparison",
         "insight from comparison",
-        "what is interesting",
-        "what is surprising",
+        "what is interesting in this comparison",
+        "what is surprising about this comparison",
         "why are they different",
-        "what unusual behavior do you see in this comparison",
-        "what unusual behavior do you see",
-        "what stands out in this comparison",
         "explain this comparison",
-        "analyze the comparison"
+        "analyze the comparison",
+        "what unusual behavior do you see"
     ]
 
     return any(p in q for p in phrases)
@@ -4359,12 +4338,14 @@ def answer_question(question):
     ctx = st.session_state.get("last_result_context", {})
     bridge_ids_ctx = ctx.get("bridge_ids") if isinstance(ctx, dict) else None
     cluster_ids_ctx = ctx.get("cluster_ids") if isinstance(ctx, dict) else None
+    label_ctx = ctx.get("label") if isinstance(ctx, dict) else None
 
     # 0) Cluster comparison follow-up should take precedence over bridge follow-ups
     if (
         is_cluster_comparison_followup(question)
         and isinstance(cluster_ids_ctx, list)
         and len(cluster_ids_ctx) == 2
+        and label_ctx == "compare_clusters"
     ):
         result = analyze_cluster_comparison(cluster_ids_ctx)
         fig = make_compare_clusters_figure(cluster_ids_ctx[0], cluster_ids_ctx[1]) if 'make_compare_clusters_figure' in globals() else None
